@@ -1,15 +1,24 @@
 import type { PlayerInfo } from '@funfair/shared';
 import type { ControllerView } from '@funfair/shared/client';
 import {
+  AIM_UNITS,
   HOLES,
+  MIN_POWER,
   ROLL_COOLDOWN_MS,
+  ROWS,
+  ZONE_LABEL,
+  ZONE_POINTS,
   clamp,
   ordinal,
   resolveRoll,
   type RollABallInput,
   type RollABallPlayerState,
   type RollKind,
+  type RollResult,
+  type Zone,
 } from './logic';
+
+export const ZONE_COLORS: Record<Zone, string> = { walk: '#5ce07a', trot: '#ffb547', gallop: '#ff5c5c' };
 
 /** Flick speed (canvas heights per second) that counts as full power. */
 const POWER_SCALE = 8;
@@ -31,9 +40,11 @@ interface Flight {
   startedAt: number;
   power: number;
   aim: number;
+  /** Client-side prediction of where the ball lands (same rules as the server). */
+  landing: RollResult;
   rollsBefore: number;
   /** Set once the server confirms the roll. */
-  confirmed: { points: number; kind: RollKind } | null;
+  confirmed: { points: number; kind: RollKind; zone: Zone | null } | null;
   popupAt: number | null;
 }
 
@@ -88,16 +99,47 @@ export function mountRollABallController(
   }
 
   // ---- geometry -----------------------------------------------------------
-  const boardTop = () => H * 0.08;
-  const rampBottom = () => H * 0.8;
+  // Top-down view: legend, then the pyramid board (apex at the back), the ramp
+  // lip, the ramp, and the ball's rest position at the bottom.
+  const legendY = () => H * 0.045;
+  const boardBack = () => H * 0.15; // apex row
+  const boardFront = () => H * 0.6; // front row
+  const lipY = () => H * 0.67;
+  const rampBottom = () => H * 0.82;
   const restY = () => H * 0.9;
   const cx = () => W / 2;
-  const yForPower = (p: number) => rampBottom() - clamp(p, 0, 1) * (rampBottom() - boardTop());
+  const rowSpacing = () => (boardFront() - boardBack()) / (ROWS - 1);
+  /** Half-width of the board at a given y – narrower towards the back for a little perspective. */
   const halfWidthAt = (y: number) => {
-    const t = clamp((rampBottom() - y) / (rampBottom() - boardTop()), 0, 1);
-    return W * (0.42 - 0.12 * t);
+    const t = clamp((rampBottom() - y) / (rampBottom() - boardBack()), 0, 1);
+    return W * (0.44 - 0.14 * t);
   };
-  const ballR = () => Math.max(14, W * 0.05);
+  const yForRow = (row: number) => boardFront() - row * rowSpacing();
+  /** Canvas x for a lateral position in board units at a given y. */
+  const xAt = (units: number, y: number) => cx() + (units / AIM_UNITS) * halfWidthAt(y);
+  const holeR = () => Math.min((halfWidthAt(boardFront()) / AIM_UNITS) * 0.38, rowSpacing() * 0.38);
+  const ballR = () => Math.max(12, holeR() * 0.85);
+  /** Where a roll comes to rest on the canvas. */
+  const restingPoint = (r: RollResult, power: number) => {
+    switch (r.kind) {
+      case 'hit': {
+        const y = yForRow(r.row!);
+        return { x: xAt(r.x, y), y };
+      }
+      case 'wide': {
+        const y = yForRow(r.row!);
+        return { x: xAt(clamp(r.x, -AIM_UNITS, AIM_UNITS), y), y };
+      }
+      case 'short': {
+        const y = rampBottom() - (clamp(power, 0, MIN_POWER) / MIN_POWER) * (rampBottom() - lipY());
+        return { x: xAt(r.x, y), y };
+      }
+      case 'gutter': {
+        const y = boardBack() - rowSpacing() * 0.8;
+        return { x: xAt(r.x * 0.6, y), y };
+      }
+    }
+  };
 
   // ---- input --------------------------------------------------------------
   function canRoll(now: number) {
@@ -125,7 +167,15 @@ export function mountRollABallController(
     const now = performance.now();
     if (!canRoll(now)) return;
     lastSentAt = now;
-    flight = { startedAt: now, power: gesture.power, aim: gesture.aim, rollsBefore: state!.me.rolls, confirmed: null, popupAt: null };
+    flight = {
+      startedAt: now,
+      power: gesture.power,
+      aim: gesture.aim,
+      landing: resolveRoll(gesture.power, gesture.aim),
+      rollsBefore: state!.me.rolls,
+      confirmed: null,
+      popupAt: null,
+    };
     send({ type: 'roll', power: gesture.power, aim: gesture.aim });
   };
   canvas.addEventListener('pointerup', endDrag);
@@ -148,16 +198,17 @@ export function mountRollABallController(
   }
 
   function drawBoard() {
-    const bt = boardTop();
+    const bb = boardBack();
     const rb = rampBottom();
+    const top = bb - rowSpacing() * 1.3;
     // Ramp + board as one trapezoid
     ctx.beginPath();
     ctx.moveTo(cx() - halfWidthAt(rb) - 12, H * 0.98);
     ctx.lineTo(cx() + halfWidthAt(rb) + 12, H * 0.98);
-    ctx.lineTo(cx() + halfWidthAt(bt), bt - 8);
-    ctx.lineTo(cx() - halfWidthAt(bt), bt - 8);
+    ctx.lineTo(cx() + halfWidthAt(top), top);
+    ctx.lineTo(cx() - halfWidthAt(top), top);
     ctx.closePath();
-    const g = ctx.createLinearGradient(0, bt, 0, H);
+    const g = ctx.createLinearGradient(0, top, 0, H);
     g.addColorStop(0, '#3a2412');
     g.addColorStop(0.55, '#5a3a1c');
     g.addColorStop(1, '#7a5230');
@@ -167,44 +218,56 @@ export function mountRollABallController(
     ctx.lineWidth = 3;
     ctx.stroke();
 
-    // Gutter trough at the top
-    const gy = yForPower(0.97);
+    // Gutter trough behind the apex
+    const gy = bb - rowSpacing() * 0.8;
     ctx.fillStyle = 'rgba(0,0,0,0.45)';
-    ctx.fillRect(cx() - halfWidthAt(gy), gy - 10, halfWidthAt(gy) * 2, 20);
+    ctx.fillRect(cx() - halfWidthAt(gy), gy - rowSpacing() * 0.22, halfWidthAt(gy) * 2, rowSpacing() * 0.44);
     ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    ctx.font = `600 ${Math.max(10, W * 0.03)}px system-ui, sans-serif`;
+    ctx.font = `600 ${Math.max(10, W * 0.028)}px system-ui, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('GUTTER', cx(), gy);
 
     // Ramp lip
-    const lipY = yForPower(0.16);
     ctx.strokeStyle = 'rgba(255, 220, 160, 0.25)';
     ctx.setLineDash([6, 8]);
     ctx.beginPath();
-    ctx.moveTo(cx() - halfWidthAt(lipY), lipY);
-    ctx.lineTo(cx() + halfWidthAt(lipY), lipY);
+    ctx.moveTo(cx() - halfWidthAt(lipY()), lipY());
+    ctx.lineTo(cx() + halfWidthAt(lipY()), lipY());
     ctx.stroke();
     ctx.setLineDash([]);
+
+    // Legend
+    const zones: Zone[] = ['walk', 'trot', 'gallop'];
+    ctx.font = `700 ${Math.max(11, W * 0.034)}px system-ui, sans-serif`;
+    const gap = W * 0.06;
+    const widths = zones.map((z) => ctx.measureText(`${ZONE_LABEL[z]} +${ZONE_POINTS[z]}`).width + holeR() * 1.2);
+    let x = cx() - (widths.reduce((a, b) => a + b, 0) + gap * (zones.length - 1)) / 2;
+    zones.forEach((z, i) => {
+      ctx.beginPath();
+      ctx.arc(x + holeR() * 0.4, legendY(), holeR() * 0.4, 0, Math.PI * 2);
+      ctx.fillStyle = ZONE_COLORS[z];
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`${ZONE_LABEL[z]} +${ZONE_POINTS[z]}`, x + holeR() * 1.2, legendY());
+      x += widths[i]! + gap;
+    });
   }
 
   function drawHoles() {
+    const r = holeR();
     for (const h of HOLES) {
-      if (h.points === 0) continue;
-      const y = yForPower((h.minPower + h.maxPower) / 2);
-      const r = ballR() * (0.9 + h.maxAim * 1.6);
+      const y = yForRow(h.row);
+      const x = xAt(h.x, y);
       ctx.beginPath();
-      ctx.arc(cx(), y, r, 0, Math.PI * 2);
+      ctx.arc(x, y, r, 0, Math.PI * 2);
       ctx.fillStyle = '#120a06';
       ctx.fill();
-      ctx.strokeStyle = 'rgba(255, 220, 160, 0.5)';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = Math.max(2, r * 0.22);
+      ctx.strokeStyle = ZONE_COLORS[h.zone];
       ctx.stroke();
-      ctx.fillStyle = 'rgba(255, 230, 180, 0.9)';
-      ctx.font = `800 ${Math.max(12, r * 0.8)}px system-ui, sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(h.label, cx(), y);
     }
   }
 
@@ -212,16 +275,15 @@ export function mountRollABallController(
     if (!flight) return { x: cx(), y: restY(), scale: 1 };
     const t = now - flight.startedAt;
     if (t >= BALL_TRAVEL_MS + BALL_REST_MS) return { x: cx(), y: restY(), scale: 1 };
-    const targetY = yForPower(flight.power);
-    const targetX = cx() + flight.aim * halfWidthAt(targetY) * 0.95;
+    const target = restingPoint(flight.landing, flight.power);
     const u = clamp(t / BALL_TRAVEL_MS, 0, 1);
     const eased = 1 - Math.pow(1 - u, 3);
-    const x = cx() + (targetX - cx()) * eased;
-    const y = restY() + (targetY - restY()) * eased;
-    // Sink into the hole (or not) once landed.
+    const x = cx() + (target.x - cx()) * eased;
+    const y = restY() + (target.y - restY()) * eased;
+    // Sink into the hole (or the gutter) once landed.
     const sink = u >= 1 ? clamp((t - BALL_TRAVEL_MS) / 200, 0, 1) : 0;
-    const landed = resolveRoll(flight.power, flight.aim);
-    const scale = landed.kind === 'hit' ? 1 - sink * 0.5 : landed.kind === 'gutter' ? 1 - sink * 0.6 : 1;
+    const kind = flight.landing.kind;
+    const scale = kind === 'hit' ? 1 - sink * 0.45 : kind === 'gutter' ? 1 - sink * 0.6 : 1;
     return { x, y, scale };
   }
 
@@ -278,12 +340,14 @@ export function mountRollABallController(
       return;
     }
     const u = t / POPUP_MS;
-    const { kind, points } = flight.confirmed!;
-    const text = kind === 'hit' ? `+${points}` : kind === 'wide' ? 'WIDE' : kind === 'short' ? 'SHORT' : 'GUTTER';
-    const y = yForPower(flight.power) - 40 - u * 50;
+    const { kind, points, zone } = flight.confirmed!;
+    const text =
+      kind === 'hit' && zone ? `${ZONE_LABEL[zone].toUpperCase()} +${points}` : kind === 'wide' ? 'WIDE' : kind === 'short' ? 'SHORT' : 'GUTTER';
+    // Popups live in the empty ramp area so they never cover the board or legend.
+    const y = (lipY() + restY()) / 2 - u * 40;
     ctx.globalAlpha = 1 - u * u;
-    ctx.fillStyle = kind === 'hit' ? '#5ce07a' : '#ff8a8a';
-    ctx.font = `900 ${Math.max(28, W * 0.14)}px system-ui, sans-serif`;
+    ctx.fillStyle = kind === 'hit' && zone ? ZONE_COLORS[zone] : '#ff8a8a';
+    fitFont(ctx, text, 900, Math.max(26, W * 0.12), W * 0.85);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineWidth = 6;
@@ -335,7 +399,7 @@ export function mountRollABallController(
       players = new Map(playerList.map((p) => [p.id, p]));
 
       if (flight && !flight.confirmed && next.me.rolls > flight.rollsBefore && next.me.lastRoll) {
-        flight.confirmed = { points: next.me.lastRoll.points, kind: next.me.lastRoll.kind };
+        flight.confirmed = { points: next.me.lastRoll.points, kind: next.me.lastRoll.kind, zone: next.me.lastRoll.zone };
       }
       rankEl.textContent = next.phase === 'countdown' ? 'Ready?' : `${ordinal(next.me.rank)} of ${next.playerCount}`;
       scoreEl.textContent = `${next.me.progress} / ${next.trackLength}`;

@@ -51,7 +51,7 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
     racer.rolls += 1;
     racer.progress = Math.min(TRACK_LENGTH, racer.progress + result.points);
     racer.lastRoll = { ...result, seq: racer.rolls, power: input.power, aim: input.aim, at: this.raceMs };
-    this.feed.unshift({ playerId, seq: racer.rolls, points: result.points, kind: result.kind, at: this.raceMs });
+    this.feed.unshift({ playerId, seq: racer.rolls, points: result.points, kind: result.kind, zone: result.zone, at: this.raceMs });
     if (this.feed.length > FEED_LENGTH) this.feed.length = FEED_LENGTH;
 
     if (racer.progress >= TRACK_LENGTH) {

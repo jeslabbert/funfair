@@ -1,6 +1,6 @@
 import type { PlayerInfo } from '@funfair/shared';
 import type { HostView } from '@funfair/shared/client';
-import type { FeedEntry, RollABallHostState } from './logic';
+import { ZONE_LABEL, type FeedEntry, type RollABallHostState } from './logic';
 import { fitFont } from './controller';
 
 const LERP_RATE = 7; // higher = snappier catch-up to the server position
@@ -11,7 +11,7 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       <div class="rab-track-wrap"><canvas class="rab-track"></canvas></div>
       <aside class="rab-side">
         <h2>Roll-a-Ball Derby</h2>
-        <p class="rab-side-hint">Flick the ball up the ramp. Land it in a hole to move your horse: 10, 20, 30 or the tiny 50. First to the finish wins.</p>
+        <p class="rab-side-hint">Flick the ball up the ramp into the pyramid. Front holes make your horse walk (+1), the arrow makes it trot (+2), the back triangle makes it gallop (+3). First to the finish wins.</p>
         <ol class="rab-feed"></ol>
       </aside>
     </div>`;
@@ -121,7 +121,9 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       ctx.font = `${size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const bob = r.finishedAt === null && state!.phase !== 'countdown' ? Math.sin(now / 90 + i) * 2 : 0;
+      const fresh = r.lastRoll && state!.raceMs - r.lastRoll.at < 700 ? r.lastRoll.zone : null;
+      const amp = fresh === 'gallop' ? 6 : fresh === 'trot' ? 4 : 2;
+      const bob = r.finishedAt === null && state!.phase !== 'countdown' ? Math.sin(now / (fresh === 'gallop' ? 60 : 90) + i) * amp : 0;
       ctx.fillText(p?.avatar ?? '🐎', x, yc + bob);
 
       // Points bubble
@@ -182,7 +184,7 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
 function feedLabel(f: FeedEntry): string {
   switch (f.kind) {
     case 'hit':
-      return `+${f.points}`;
+      return `${f.zone ? ZONE_LABEL[f.zone] : ''} +${f.points}`;
     case 'wide':
       return 'wide';
     case 'short':

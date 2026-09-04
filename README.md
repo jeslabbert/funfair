@@ -94,15 +94,25 @@ can be unit-tested with `node:test` (`pnpm test`).
 
 ## Roll-a-Ball Derby
 
-- Phones show a top-down ramp. A flick gesture's **speed** sets the distance
-  (short → 10 → 20 → 30 → 50 → gutter) and its **angle** sets the aim; the higher holes are
-  smaller, so an off-centre flick that had the right power still misses ("wide").
-- Every point moves the player's horse one unit along a 40-unit track on the big screen.
+- Phones show a top-down ramp leading onto a **pyramid of holes** (7 rows, 28 holes), the
+  classic Kentucky Derby board:
+  - **Back triangle = gallop (+3)** – the six holes at the apex.
+  - **Middle arrow = trot (+2)** – the full row under the triangle plus the outside edges
+    of the front rows, forming a chevron.
+  - **Front = walk (+1)** – everything inside the arrow.
+- A flick's **speed** sets how deep into the pyramid the ball goes (too soft falls short
+  on the ramp, too hard flies into the back gutter) and its **angle** drifts it sideways.
+  The ball drops into the nearest hole on the row it reaches; drift past the pyramid's
+  edge is "wide". Since the pyramid narrows towards the back, a gallop needs both power
+  and a straight roll, while a hard-to-the-side soft roll still finds a trot hole on the
+  arrow's arm.
+- Every point moves the player's horse one unit along a 30-unit track on the big screen.
   First across the line wins; the rest are ranked by distance.
 - Rolls are rate-limited server-side (0.9 s), so it's about aim rather than tapping speed.
-- Tuning knobs: `HOLES`, `TRACK_LENGTH`, `ROLL_COOLDOWN_MS` in `logic.ts`;
-  `POWER_SCALE` / `AIM_SCALE` (gesture feel) at the top of `controller.ts`. These were
-  set from desk testing – expect to tweak `POWER_SCALE` after a round on real phones.
+- Tuning knobs: `ROWS`, `GALLOP_FROM_ROW`, `TROT_ROW`, `ZONE_POINTS`, `MIN_POWER`,
+  `MAX_POWER`, `TRACK_LENGTH`, `ROLL_COOLDOWN_MS` in `logic.ts`; `POWER_SCALE` /
+  `AIM_SCALE` (gesture feel) at the top of `controller.ts`. These were set from desk
+  testing – expect to tweak `POWER_SCALE` after a round on real phones.
 
 ## Roadmap
 

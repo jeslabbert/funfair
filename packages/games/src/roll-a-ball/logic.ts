@@ -5,58 +5,110 @@
  */
 
 /** Track units the racer must cover to win. One point moves one unit. */
-export const TRACK_LENGTH = 40;
+export const TRACK_LENGTH = 30;
 /** Minimum time between rolls per player. Keeps it about aim, not tap speed. */
 export const ROLL_COOLDOWN_MS = 900;
 export const COUNTDOWN_MS = 3000;
 /** How long the finish screen lingers before the room shows results. */
 export const FINISH_LINGER_MS = 5000;
-/** Rolls that are too far off-centre miss even if the distance was right. */
-export const MAX_AIM = 1;
+export type Zone = 'walk' | 'trot' | 'gallop';
+
+export const ZONE_POINTS: Record<Zone, number> = { walk: 1, trot: 2, gallop: 3 };
+export const ZONE_LABEL: Record<Zone, string> = { walk: 'Walk', trot: 'Trot', gallop: 'Gallop' };
+
+/**
+ * The board is a pyramid of holes, ROWS deep: the front row (nearest the ramp)
+ * has ROWS holes, each row back has one fewer, and the apex has one.
+ *
+ *            G            back  – gallop: the apex triangle
+ *          G   G
+ *        G   G   G
+ *      T   T   T   T      middle – trot: an arrow/chevron under the triangle…
+ *    T   W   W   W   T    …whose arms run down the outside edges
+ *  T   W   W   W   W   T
+ *T   W   W   W   W   W   T front – walk: everything inside the arrow
+ */
+export const ROWS = 7;
+/** Rows (from the front, 0-based) that belong to the gallop triangle. */
+export const GALLOP_FROM_ROW = 4;
+/** The full row that forms the tip of the trot arrow. */
+export const TROT_ROW = 3;
 
 export interface Hole {
-  id: string;
-  label: string;
+  row: number;
+  col: number;
+  /** Lateral position in board units; the front row spans -3..3, the apex is 0. */
+  x: number;
+  zone: Zone;
   points: number;
-  /** Inclusive lower bound of roll power (0..1) that reaches this row. */
-  minPower: number;
-  /** Exclusive upper bound. */
-  maxPower: number;
-  /** Absolute aim (0..1) must be at or below this to drop in. */
-  maxAim: number;
 }
 
-/** Rows of the board from the bottom of the ramp upwards. */
-export const HOLES: readonly Hole[] = [
-  { id: 'short', label: 'Short', points: 0, minPower: 0, maxPower: 0.18, maxAim: MAX_AIM },
-  { id: 'ten', label: '10', points: 1, minPower: 0.18, maxPower: 0.42, maxAim: 0.6 },
-  { id: 'twenty', label: '20', points: 2, minPower: 0.42, maxPower: 0.64, maxAim: 0.45 },
-  { id: 'thirty', label: '30', points: 3, minPower: 0.64, maxPower: 0.82, maxAim: 0.32 },
-  { id: 'fifty', label: '50', points: 5, minPower: 0.82, maxPower: 0.94, maxAim: 0.22 },
-  { id: 'gutter', label: 'Gutter', points: 0, minPower: 0.94, maxPower: 1.0001, maxAim: MAX_AIM },
-];
+export function holesInRow(row: number): number {
+  return ROWS - row;
+}
+
+export function zoneOf(row: number, col: number): Zone {
+  if (row >= GALLOP_FROM_ROW) return 'gallop';
+  if (row === TROT_ROW) return 'trot';
+  return col === 0 || col === holesInRow(row) - 1 ? 'trot' : 'walk';
+}
+
+export const HOLES: readonly Hole[] = (() => {
+  const holes: Hole[] = [];
+  for (let row = 0; row < ROWS; row++) {
+    const n = holesInRow(row);
+    for (let col = 0; col < n; col++) {
+      const zone = zoneOf(row, col);
+      holes.push({ row, col, x: col - (n - 1) / 2, zone, points: ZONE_POINTS[zone] });
+    }
+  }
+  return holes;
+})();
+
+/** Power below this doesn't reach the board; above the top it flies into the back gutter. */
+export const MIN_POWER = 0.15;
+export const MAX_POWER = 0.95;
+/** Full sideways aim drifts the ball this many board units – just past the front row's edge. */
+export const AIM_UNITS = (ROWS - 1) / 2 + 0.5;
 
 export type RollKind = 'hit' | 'wide' | 'short' | 'gutter';
 
 export interface RollResult {
-  holeIndex: number;
-  points: number;
   kind: RollKind;
+  points: number;
+  zone: Zone | null;
+  /** Row the ball reached (0 = front). Set for hits and wides. */
+  row: number | null;
+  /** Hole within that row for hits. */
+  col: number | null;
+  /** Where the ball came to rest, in board units – used for the phone animation. */
+  x: number;
 }
 
 export function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+/** 0..1 depth into the board for a given power, or null if it fell short / overshot. */
+export function depthForPower(power: number): number | null {
+  const p = clamp(power, 0, 1);
+  if (p < MIN_POWER || p > MAX_POWER) return null;
+  return (p - MIN_POWER) / (MAX_POWER - MIN_POWER);
+}
+
 export function resolveRoll(power: number, aim: number): RollResult {
   const p = clamp(power, 0, 1);
-  const a = Math.abs(clamp(aim, -1, 1));
-  const holeIndex = HOLES.findIndex((h) => p >= h.minPower && p < h.maxPower);
-  const hole = HOLES[holeIndex] ?? HOLES[0]!;
-  if (hole.id === 'short') return { holeIndex, points: 0, kind: 'short' };
-  if (hole.id === 'gutter') return { holeIndex, points: 0, kind: 'gutter' };
-  if (a > hole.maxAim) return { holeIndex, points: 0, kind: 'wide' };
-  return { holeIndex, points: hole.points, kind: 'hit' };
+  const x = clamp(aim, -1, 1) * AIM_UNITS;
+  const depth = depthForPower(p);
+  if (depth === null) {
+    return { kind: p < MIN_POWER ? 'short' : 'gutter', points: 0, zone: null, row: null, col: null, x };
+  }
+  const row = Math.round(depth * (ROWS - 1));
+  const n = holesInRow(row);
+  const col = Math.round(x + (n - 1) / 2);
+  if (col < 0 || col >= n) return { kind: 'wide', points: 0, zone: null, row, col: null, x };
+  const zone = zoneOf(row, col);
+  return { kind: 'hit', points: ZONE_POINTS[zone], zone, row, col, x: col - (n - 1) / 2 };
 }
 
 export type RacePhase = 'countdown' | 'racing' | 'finished';
@@ -85,6 +137,7 @@ export interface FeedEntry {
   seq: number;
   points: number;
   kind: RollKind;
+  zone: Zone | null;
   at: number;
 }
 
