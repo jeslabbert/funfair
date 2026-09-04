@@ -380,6 +380,28 @@ input {
   font-weight: 700;
 }
 
+/* ---- practice ---- */
+.practice-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 4px;
+  font-weight: 700;
+}
+.practice-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.btn-small {
+  padding: 8px 14px;
+  font-size: 0.95rem;
+}
+a.btn-link {
+  text-decoration: none;
+}
+
 /* ---- results ---- */
 .results {
   align-items: center;

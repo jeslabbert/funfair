@@ -29,6 +29,9 @@ pnpm start        # http://0.0.0.0:3000
 
 Other scripts: `pnpm typecheck`, `pnpm test`.
 
+`/practice/` runs any single-player-capable game locally in the browser – no room, no
+server round-trips – handy for learning the controls or tuning the feel on a real phone.
+
 ### Installing the phone app
 
 Open `/play/` on the phone and use *Add to Home Screen*. The manifest and service worker
@@ -42,7 +45,7 @@ PWA experience).
 packages/shared   Protocol + game contracts shared by server and browser
 packages/games    One folder per game: rules, server instance, host view, phone view
 apps/server       Node + ws: rooms, sessions, reconnects, the game loop, static hosting
-apps/web          Vite app: /  = host screen,  /play/ = phone controller (PWA)
+apps/web          Vite app: / = host screen, /play/ = phone controller (PWA), /practice/ = solo range
 ```
 
 ### How a session works

@@ -152,7 +152,7 @@ function joinScreen(): HTMLElement {
     error ? h('p', { class: 'error' }, error) : null,
     h('button', { class: 'btn btn-primary', type: 'submit' }, 'Join the party'),
   );
-  return h('main', { class: 'screen join' }, h('h1', { class: 'brand brand-big' }, '🎪 Funfair'), h('p', { class: 'tagline' }, 'Enter the code on the big screen.'), form, h('div', { class: 'ctl-footer' }, h('span', { id: 'status-slot' })));
+  return h('main', { class: 'screen join' }, h('h1', { class: 'brand brand-big' }, '🎪 Funfair'), h('p', { class: 'tagline' }, 'Enter the code on the big screen.'), form, h('div', { class: 'ctl-footer' }, h('span', { id: 'status-slot' }), h('a', { class: 'btn btn-link', href: '/practice/' }, 'Practice first')));
 }
 
 function setError(msg: string) {
