@@ -19,6 +19,8 @@ import {
   type Zone,
 } from './logic';
 
+import { QUAT_IDENTITY, createBallRenderer, quatFromAxisAngle, quatMultiply, quatNormalize, type Quat } from './ball3d';
+
 export const ZONE_COLORS: Record<Zone, string> = { walk: '#5ce07a', trot: '#ffb547', gallop: '#ff5c5c' };
 
 /** Flick speed (canvas heights per second) that counts as a full-power snap. */
@@ -105,11 +107,13 @@ export function mountRollABallController(
   let flight: Flight | null = null;
   let labels: FloatingLabel[] = [];
   let lastHopAt = -Infinity;
-  /** Rolling state: accumulated spin (radians) and the last direction of travel on screen. */
+  /** Rolling state: the ball's orientation, plus a scalar spin/direction for the 2D fallback. */
+  let orientation: Quat = QUAT_IDENTITY;
   let spin = 0;
   let spinDirX = 0;
   let spinDirY = -1;
   let prevBoard: { x: number; y: number } | null = null;
+  const ball3d = createBallRenderer();
   let samples: Sample[] = [];
   let dragging = false;
   let raf = 0;
@@ -205,11 +209,13 @@ export function mountRollABallController(
       const dy = cur.y - prevBoard.y;
       const ds = Math.sqrt(dx * dx + dy * dy);
       if (ds > 1e-4) {
-        spin += ds / PHYSICS.ballRadius;
+        const angle = ds / PHYSICS.ballRadius;
+        spin += angle;
         // Screen direction: board +y is up the screen.
-        const len = Math.sqrt(dx * dx + dy * dy);
-        spinDirX = dx / len;
-        spinDirY = -dy / len;
+        spinDirX = dx / ds;
+        spinDirY = -dy / ds;
+        // A ball rolling along d on a table with normal z turns about z × d.
+        orientation = quatNormalize(quatMultiply(quatFromAxisAngle(-dy, dx, 0, angle), orientation));
       }
     }
     prevBoard = cur;
@@ -523,6 +529,19 @@ export function mountRollABallController(
     }
   }
 
+  /** Draw the ball at a screen position: the WebGL sphere when available, the painted one otherwise. */
+  function paintBall(x: number, y: number, r: number, color: string, alpha: number, dim: number) {
+    if (ball3d) {
+      const img = ball3d.render(hexToRgb(color), [1, 0.96, 0.86], orientation, dim);
+      const half = r / ball3d.radiusFraction;
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(img, x - half, y - half, half * 2, half * 2);
+      ctx.globalAlpha = 1;
+    } else {
+      drawSphere(x, y, r, color, alpha, dim, spin, spinDirX, spinDirY);
+    }
+  }
+
   function drawBall(now: number) {
     const color = me?.color ?? '#fff';
     const ready = ballReady(now);
@@ -557,11 +576,11 @@ export function mountRollABallController(
       ctx.rect(0, 0, W, pose.sinkingInto.y);
       ctx.ellipse(pose.sinkingInto.x, pose.sinkingInto.y, rx, ry, 0, 0, Math.PI * 2);
       ctx.clip();
-      drawSphere(bx, by, r, color, pose.alpha, pose.sink * 0.7, spin, spinDirX, spinDirY);
+      paintBall(bx, by, r, color, pose.alpha, pose.sink * 0.7);
       ctx.restore();
       drawHoleFront(pose.sinkingInto.x, pose.sinkingInto.y, pose.sinkingInto.zone);
     } else {
-      drawSphere(bx, by, r, color, pose.alpha, 0, spin, spinDirX, spinDirY);
+      paintBall(bx, by, r, color, pose.alpha, 0);
     }
 
     if (inHand && ready) {
@@ -775,6 +794,12 @@ function buzz(pattern: number | number[]) {
   } catch {
     /* not supported */
   }
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return [1, 1, 1];
+  return [parseInt(m[1]!, 16) / 255, parseInt(m[2]!, 16) / 255, parseInt(m[3]!, 16) / 255];
 }
 
 function hexToRgba(hex: string, a: number): string {

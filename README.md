@@ -100,7 +100,10 @@ can be unit-tested with `node:test` (`pnpm test`).
 - Phones show a table in perspective: the bottom half is runway for the swipe, the top half
   holds a **pyramid of holes** (5 rows, 15 holes), the classic Kentucky Derby board. Holes
   are drawn with raised lips and a lit far wall, and a caught ball slides to the hole and
-  sinks behind the near lip. The pyramid's stagger means a dead-straight roll threads
+  sinks behind the near lip. The ball itself is a real WebGL sphere (`ball3d.ts`): a lit
+  mesh with a spot pattern whose orientation is a quaternion driven by the distance rolled,
+  composited into the 2D scene so the hole clipping still applies. Painted fallback when
+  WebGL is unavailable. The pyramid's stagger means a dead-straight roll threads
   between the holes of every other row – aim matters.
   - **Back triangle = gallop (+3)** – the three holes at the apex.
   - **Middle arrow = trot (+2)** – the full row under the triangle plus the outside edges
