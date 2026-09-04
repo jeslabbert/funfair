@@ -79,6 +79,14 @@ test('a gentle roll comes back down the ramp', () => {
   assert.ok(lastY <= BOARD.ballStartY + 0.05);
   // The ball went up before it came back.
   assert.ok(Math.max(...sim.frames.filter((_, i) => i % 2 === 1)) > 1);
+  // …and bounced off the front bumper at least twice before settling.
+  const bumps = sim.events.filter((e) => e.type === 'bumper');
+  assert.ok(bumps.length >= 2, `expected bumper bounces, got ${bumps.length}`);
+  // Each rebound is smaller than the last.
+  const ys = sim.frames.filter((_, i) => i % 2 === 1);
+  const firstBump = sim.frames.length / 2 - Math.round((sim.outcome.endedAt - bumps[0]!.t) / PHYSICS.stepMs);
+  const peakAfter = Math.max(...ys.slice(firstBump));
+  assert.ok(peakAfter > BOARD.ballStartY + 0.1 && peakAfter < 3, `rebound peak ${peakAfter}`);
 });
 
 test('the right speed drops into the front row; the lip rejects a crawl; too fast skips', () => {

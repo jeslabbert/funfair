@@ -67,6 +67,10 @@ export const PHYSICS = {
   skipDamping: 0.9,
   lipRestitution: 0.35,
   railRestitution: 0.55,
+  /** The front stop at the bottom of the ramp: a returning ball rebounds off it… */
+  bumperRestitution: 0.45,
+  /** …until it arrives slower than this, when it settles and the roll is over. */
+  settleSpeed: 0.7,
   ballRadius: 0.3,
   /** Launch speed at full power. */
   maxLaunchSpeed: 15,
@@ -115,7 +119,7 @@ export const HOLES: readonly Hole[] = (() => {
 /** hit = dropped into a hole; gutter = flew off the back; back = rolled back to the player. */
 export type RollKind = 'hit' | 'gutter' | 'back';
 
-export type RollEventType = 'lip' | 'skip' | 'rail' | 'hit' | 'gutter' | 'back';
+export type RollEventType = 'lip' | 'skip' | 'rail' | 'bumper' | 'hit' | 'gutter' | 'back';
 
 export interface RollEvent {
   /** Milliseconds after launch. */
@@ -168,8 +172,21 @@ export function clampLaunch(vx: number, vy: number): { vx: number; vy: number } 
 
 /** Roll a ball up the board and follow it until it drops in, flies off the back, or comes home. */
 export function simulateRoll(launchVx: number, launchVy: number): RollSimulation {
-  const { slope, friction, captureRadius, lipSpeed, captureSpeed, skipDamping, lipRestitution, railRestitution, ballRadius, stepMs, maxDurationMs } =
-    PHYSICS;
+  const {
+    slope,
+    friction,
+    captureRadius,
+    lipSpeed,
+    captureSpeed,
+    skipDamping,
+    lipRestitution,
+    railRestitution,
+    bumperRestitution,
+    settleSpeed,
+    ballRadius,
+    stepMs,
+    maxDurationMs,
+  } = PHYSICS;
   const dt = stepMs / 1000;
   const railX = BOARD.halfWidth - ballRadius;
   const launch = clampLaunch(launchVx, launchVy);
@@ -183,6 +200,8 @@ export function simulateRoll(launchVx: number, launchVy: number): RollSimulation
   const events: RollEvent[] = [];
   /** Holes whose lip the ball is currently over, so each pass triggers once. */
   const inside = new Set<Hole>();
+  /** Sitting against the front bumper. */
+  let resting = false;
 
   const finish = (kind: RollKind, hole: Hole | null): RollSimulation => {
     events.push({ t, type: kind, x, y });
@@ -211,6 +230,7 @@ export function simulateRoll(launchVx: number, launchVy: number): RollSimulation
     }
     vx += ax * dt;
     vy += ay * dt;
+    if (resting && vy < 0) vy = 0;
     x += vx * dt;
     y += vy * dt;
     t += stepMs;
@@ -229,7 +249,21 @@ export function simulateRoll(launchVx: number, launchVy: number): RollSimulation
     frames.push(x, y);
 
     if (y > BOARD.gutterY) return finish('gutter', null);
-    if (y < BOARD.ballStartY && vy < 0) return finish('back', null);
+
+    // Front bumper: bounce back up the slope, a little less each time, then settle.
+    if (y < BOARD.ballStartY && vy < 0) {
+      y = BOARD.ballStartY;
+      if (-vy > settleSpeed) {
+        vy = -vy * bumperRestitution;
+        events.push({ t, type: 'bumper', x, y });
+      } else {
+        vy = 0;
+        resting = true;
+      }
+    } else if (y > BOARD.ballStartY + 0.02) {
+      resting = false;
+    }
+    if (resting && Math.abs(vx) < settleSpeed) return finish('back', null);
 
     // Holes (only the rows the ball could be touching)
     for (const hole of HOLES) {

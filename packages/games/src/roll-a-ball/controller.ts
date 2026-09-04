@@ -444,7 +444,11 @@ export function mountRollABallController(
       };
     }
     if (sim.outcome.kind === 'gutter') return { x, y: y - s * H * 0.02, scale: 1 - s * 0.6, alpha: 1 - s, sinkingInto: null, sink: 0 };
-    return { x, y, scale: 1, alpha: 1, sinkingInto: null, sink: 0 };
+    // Rolled back: pick it up from where it settled and bring it to hand.
+    const rest = restPoint();
+    const u = clamp((t - ended) / RETURN_DELAY_MS, 0, 1);
+    const eased = u * u * (3 - 2 * u);
+    return { x: x + (rest.x - x) * eased, y: y + (rest.y - y) * eased, scale: 1, alpha: 1, sinkingInto: null, sink: 0 };
   }
 
   /**
@@ -605,7 +609,7 @@ export function mountRollABallController(
       if (ev.type === 'skip') flight.skipShown = true;
       if (ev.type === 'lip' || ev.type === 'skip') buzz(10);
       if (ev.type === 'lip' || ev.type === 'skip') lastHopAt = now;
-      if (ev.type === 'rail') buzz(6);
+      if (ev.type === 'rail' || ev.type === 'bumper') buzz(6);
     }
   }
 
