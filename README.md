@@ -97,10 +97,11 @@ can be unit-tested with `node:test` (`pnpm test`).
 
 ## Roll-a-Ball Derby
 
-- Phones show a top-down ramp leading onto a **pyramid of holes** (5 rows, 15 holes), the
-  classic Kentucky Derby board. Rows sit further apart than holes within a row, so it's a
-  long roll up, and the pyramid's stagger means a dead-straight roll threads between the
-  holes of every other row – aim matters.
+- Phones show a table in perspective: the bottom half is runway for the swipe, the top half
+  holds a **pyramid of holes** (5 rows, 15 holes), the classic Kentucky Derby board. Holes
+  are drawn with raised lips and a lit far wall, and a caught ball slides to the hole and
+  sinks behind the near lip. The pyramid's stagger means a dead-straight roll threads
+  between the holes of every other row – aim matters.
   - **Back triangle = gallop (+3)** – the three holes at the apex.
   - **Middle arrow = trot (+2)** – the full row under the triangle plus the outside edges
     of the front rows, forming a chevron.

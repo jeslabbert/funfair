@@ -82,7 +82,7 @@ test('a gentle roll comes back down the ramp', () => {
 });
 
 test('the right speed drops into the front row; the lip rejects a crawl; too fast skips', () => {
-  const walk = simulateRoll(launch(0.45).vx, launch(0.45).vy);
+  const walk = simulateRoll(launch(0.55).vx, launch(0.55).vy);
   assert.equal(walk.outcome.kind, 'hit');
   assert.equal(walk.outcome.zone, 'walk');
   assert.equal(walk.outcome.row, 0);
@@ -91,7 +91,7 @@ test('the right speed drops into the front row; the lip rejects a crawl; too fas
 
   // Somewhere in the low-power range a ball creeps up to a lip, fails to climb it, and comes back.
   let lipped = 0;
-  for (let power = 0.3; power < 0.6; power += 0.01) {
+  for (let power = 0.4; power < 0.75; power += 0.01) {
     for (const lateral of [0, 0.1, 0.2]) {
       const sim = simulateRoll(launch(power, lateral).vx, launch(power, lateral).vy);
       if (types(sim.events).includes('lip') && sim.outcome.kind === 'back') lipped++;
@@ -99,13 +99,13 @@ test('the right speed drops into the front row; the lip rejects a crawl; too fas
   }
   assert.ok(lipped > 0, 'no roll bounced off a lip');
 
-  const quick = simulateRoll(launch(0.55).vx, launch(0.55).vy);
+  const quick = simulateRoll(launch(0.65).vx, launch(0.65).vy);
   assert.ok(types(quick.events).includes('skip'), 'ball should skip the first hole');
   assert.equal(quick.outcome.kind, 'hit');
 });
 
 test('a hard straight roll reaches the gallop triangle; a wide one bounces off the rail', () => {
-  const gallop = simulateRoll(launch(0.85).vx, launch(0.85).vy);
+  const gallop = simulateRoll(launch(0.8).vx, launch(0.8).vy);
   assert.equal(gallop.outcome.zone, 'gallop');
   assert.equal(gallop.outcome.points, 3);
   assert.equal(gallop.outcome.row, ROWS - 1, 'a straight roll at this power reaches the apex');
@@ -128,12 +128,12 @@ test('one ball at a time; points land when the ball does', () => {
   advance(COUNTDOWN_MS);
   assert.equal(game.hostState().phase, 'racing');
 
-  const sim = simulateRoll(launch(0.45).vx, launch(0.45).vy);
-  game.onInput('a', { type: 'roll', ...launch(0.45) });
-  game.onInput('a', { type: 'roll', ...launch(0.85) });
+  const sim = simulateRoll(launch(0.55).vx, launch(0.55).vy);
+  game.onInput('a', { type: 'roll', ...launch(0.55) });
+  game.onInput('a', { type: 'roll', ...launch(0.8) });
   let s = game.playerState('a');
   assert.ok(s.me.ball, 'ball is in play');
-  assert.ok(Math.abs(s.me.ball!.vy - launch(0.45).vy) < 1e-9, 'second roll ignored while the first is in play');
+  assert.ok(Math.abs(s.me.ball!.vy - launch(0.55).vy) < 1e-9, 'second roll ignored while the first is in play');
   assert.equal(s.me.progress, 0, 'no points until it drops in');
   assert.ok(s.cooldownMs > 0);
 
@@ -156,8 +156,8 @@ test('first racer to the line wins, then the game finishes after the linger', ()
   advance(COUNTDOWN_MS);
   let rolls = 0;
   while (game.hostState().phase !== 'finished' && rolls < 40) {
-    game.onInput('a', { type: 'roll', ...launch(0.85) });
-    game.onInput('b', { type: 'roll', ...launch(0.45) });
+    game.onInput('a', { type: 'roll', ...launch(0.8) });
+    game.onInput('b', { type: 'roll', ...launch(0.55) });
     advance(3000);
     rolls++;
   }

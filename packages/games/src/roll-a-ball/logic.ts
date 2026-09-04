@@ -41,11 +41,11 @@ export const TROT_ROW = 2;
 export const BOARD = {
   /** Side rails sit at ±halfWidth. */
   halfWidth: 3.0,
-  /** The ramp meets the board at this y. */
-  rampLength: 3.0,
-  firstRowY: 3.6,
-  /** Rows are further apart than holes within a row: it's a long roll up. */
-  rowSpacing: 1.5,
+  /** The ramp meets the board at this y – the bottom half of the table is runway. */
+  rampLength: 5.0,
+  /** Holes are packed into the top half, one unit apart. */
+  firstRowY: 5.6,
+  rowSpacing: 1.0,
   /** Past this the ball drops into the back gutter. */
   gutterY: 10.4,
   /** Where a ball sits in the player's hand. */
@@ -266,10 +266,6 @@ export function simulateRoll(launchVx: number, launchVy: number): RollSimulation
         y = hole.y + ny * captureRadius;
         events.push({ t, type: 'lip', x: hole.x, y: hole.y });
       } else {
-        x = hole.x;
-        y = hole.y;
-        frames[frames.length - 2] = x;
-        frames[frames.length - 1] = y;
         return finish('hit', hole);
       }
     }
