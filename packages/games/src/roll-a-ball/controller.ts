@@ -13,9 +13,9 @@ import {
   grabBall,
   launchBall,
   msToTick,
-  obstaclesAt,
   ordinal,
   stepTable,
+  tableObstacles,
   tablesMatch,
   WAVE_FADE_TICKS,
   WAVE_NAMES,
@@ -419,7 +419,7 @@ export function mountRollABallController(
     advanceLocal(now);
     updateSpins();
     drawBoard();
-    const obstacles = table ? obstaclesAt(table.tick, table.seed) : null;
+    const obstacles = table ? tableObstacles(table) : null;
     drawHoles(obstacles);
     if (obstacles) drawObstacles(obstacles, now);
     drawBalls(now);
@@ -1020,7 +1020,9 @@ export function mountRollABallController(
             ? "You're leading — keep them rolling!"
             : `${next.leaderProgress - next.me.progress} behind the leader`
           : next.phase === 'countdown'
-            ? 'Grab a ball, drag it up the ramp and flick. Keep all three going!'
+            ? next.table.obstacles
+              ? 'Obstacles are ON this race. Grab, flick, keep all three going!'
+              : 'Classic table this race. Grab, flick, keep all three going!'
             : 'Race over!';
       el.classList.toggle('rab-ctl-finished', next.phase === 'finished');
     },

@@ -56,11 +56,15 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
   private readonly sims = new Map<string, RacerSim>();
   private readonly feed: FeedEntry[] = [];
   private readonly seed: number;
+  private readonly obstacles: boolean;
 
   constructor(ctx: GameContext) {
     this.seed = Math.floor(ctx.random() * 0x7fffffff) >>> 0;
+    // The room may insist; otherwise the server flips a coin for this race.
+    const wanted = ctx.options?.obstacles;
+    this.obstacles = typeof wanted === 'boolean' ? wanted : ctx.random() < 0.5;
     for (const p of ctx.players) {
-      const table = createTable(this.seed);
+      const table = createTable(this.seed, this.obstacles);
       this.racers.set(p.id, { playerId: p.id, progress: 0, rolls: 0, lastRoll: null, balls: views(table), finishedAt: null, rank: 1 });
       this.sims.set(p.id, { table, history: new Array(HISTORY_SIZE), lastInputTick: -1, lastScoreTick: -1, queued: [] });
     }
@@ -193,19 +197,20 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
       racers: this.orderedRacers(),
       feed: [...this.feed],
       winnerId: this.winnerId,
+      obstacles: this.obstacles,
       wave: this.currentWave(),
     };
   }
 
   private currentWave(): RollABallHostState['wave'] {
-    if (this.phase === 'countdown') return null;
+    if (!this.obstacles || this.phase === 'countdown') return null;
     const w = waveAt(msToTick(this.raceMs), this.seed);
     return w ? { kind: w.kind, name: WAVE_NAMES[w.kind], t: w.t, alpha: w.alpha } : null;
   }
 
   playerState(playerId: string): RollABallPlayerState {
     const me = this.racers.get(playerId) ?? { playerId, progress: 0, rolls: 0, lastRoll: null, balls: [], finishedAt: null, rank: 0 };
-    const table = this.sims.get(playerId)?.table ?? createTable(this.seed);
+    const table = this.sims.get(playerId)?.table ?? createTable(this.seed, this.obstacles);
     let leaderProgress = 0;
     for (const r of this.racers.values()) leaderProgress = Math.max(leaderProgress, r.progress);
     return {

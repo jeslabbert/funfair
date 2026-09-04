@@ -12,6 +12,8 @@ export interface GameMeta {
 /** What the server hands a game when it starts. */
 export interface GameContext {
   players: PlayerInfo[];
+  /** Per-game settings chosen by the room (games decide the rest themselves). */
+  options?: Record<string, unknown>;
   /** Deterministic-friendly random source (0..1). */
   random: () => number;
   /** Monotonic clock in milliseconds. */

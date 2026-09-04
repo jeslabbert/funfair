@@ -265,7 +265,7 @@ function waveStart(kind: string, seed: number): number {
 
 test('a sweeper post knocks a ball back', () => {
   const seed = 42;
-  const table = createTable(seed);
+  const table = createTable(seed, true);
   // Half-way through its sweep the post crosses the centre line.
   table.tick = waveStart('peg', seed) + 180 - 1;
   assert.ok(Math.abs(obstaclesAt(table.tick + 1, seed).pegs[0]!.x) < 0.05);
@@ -285,7 +285,7 @@ test('a lid over a hole makes the ball roll straight over it', () => {
   const seed = 42;
   const start = waveStart('lids', seed);
   // Walk holes are covered during the first two seconds of the wave.
-  const table = createTable(seed);
+  const table = createTable(seed, true);
   table.tick = start + WAVE_FADE_TICKS;
   const closed = obstaclesAt(table.tick + 1, seed).closed;
   assert.ok(closed.length === 5 && closed.every((i) => HOLES[i]!.zone === 'walk'));
@@ -303,6 +303,30 @@ test('a lid over a hole makes the ball roll straight over it', () => {
   // Without the lids the same roll is a walk.
   const plain = roll(0.55);
   assert.equal(HOLES[hits(plain.events, 1)[0]!.hole!]!.zone, 'walk');
+});
+
+test('obstacles are a per-race option the server decides', () => {
+  // Off: the same tick that has a sweeper on an obstacle table is clear here.
+  const off = createTable(42, false);
+  off.tick = waveStart('peg', 42) + 180 - 1;
+  const ev: TableEvent[] = [];
+  launchBall(off, { ball: 1, x: 0, y: 4.7, vx: 0, vy: 12 }, ev);
+  for (let i = 0; i < 60; i++) stepTable(off, ev);
+  assert.ok(!ev.some((e) => e.type === 'peg'), 'no posts on a classic table');
+
+  const withOpt = (options: Record<string, unknown> | undefined, random: number) => {
+    let clock = 0;
+    const game = new RollABallGame({ players: [player('a')], random: () => random, now: () => clock, options });
+    clock += COUNTDOWN_MS;
+    game.tick(COUNTDOWN_MS);
+    return game;
+  };
+  assert.equal(withOpt({ obstacles: true }, 0.9).hostState().obstacles, true);
+  assert.equal(withOpt({ obstacles: false }, 0.1).hostState().obstacles, false);
+  assert.equal(withOpt(undefined, 0.1).hostState().obstacles, true, 'left to the server: a coin flip');
+  assert.equal(withOpt(undefined, 0.9).hostState().obstacles, false);
+  assert.equal(withOpt({ obstacles: true }, 0.9).playerState('a').table.obstacles, true);
+  assert.equal(withOpt({ obstacles: false }, 0.9).hostState().wave, null);
 });
 
 test('ordinal', () => {

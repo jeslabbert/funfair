@@ -17,7 +17,10 @@ const app = document.getElementById('app')!;
 const me: PlayerInfo = { id: 'me', name: 'You', color: PLAYER_COLORS[0], avatar: PLAYER_AVATARS[0], connected: true, isVip: true };
 
 const soloGames = clientGames.filter((g) => g.meta.minPlayers <= 1);
-const requested = new URLSearchParams(location.search).get('game');
+const params = new URLSearchParams(location.search);
+const requested = params.get('game');
+/** Obstacles: forced by `?obstacles=on|off`, otherwise decided when the page loads. */
+const obstacles = params.get('obstacles') === 'on' ? true : params.get('obstacles') === 'off' ? false : Math.random() < 0.5;
 const initial = (requested && findClientGame(requested)?.meta.id) ?? soloGames[0]?.meta.id ?? null;
 
 let timer = 0;
@@ -60,18 +63,21 @@ function run(gameId: string) {
     app.replaceChildren(pickerScreen());
     return;
   }
-  history.replaceState(null, '', `/practice/?game=${gameId}`);
+  history.replaceState(null, '', `/practice/?game=${gameId}&obstacles=${obstacles ? 'on' : 'off'}`);
 
-  const instance: GameInstance = server.create({ players: [me], random: Math.random, now: () => performance.now() });
+  const instance: GameInstance = server.create({ players: [me], random: Math.random, now: () => performance.now(), options: { obstacles } });
   // Debug hook for tooling: the authoritative instance.
   (window as unknown as { __practiceGame?: GameInstance }).__practiceGame = instance;
   const gameRoot = h('div', { class: 'game-root' });
+  const other = `/practice/?game=${gameId}&obstacles=${obstacles ? 'off' : 'on'}`;
+  const modeChip = h('span', { class: `practice-mode${obstacles ? ' practice-mode-on' : ''}` }, obstacles ? '⚠ Obstacles' : 'Classic');
   const bar = h(
     'div',
     { class: 'practice-bar' },
     h('span', { class: 'practice-title' }, 'Practice'),
+    modeChip,
+    h('a', { class: 'btn btn-link', href: other, title: 'Play the other variant' }, obstacles ? 'Try classic' : 'Try obstacles'),
     h('button', { class: 'btn btn-link', onClick: () => run(gameId) }, 'Restart'),
-    h('a', { class: 'btn btn-link', href: '/play/' }, 'Join a room'),
   );
   app.replaceChildren(h('main', { class: 'screen playing' }, bar, gameRoot));
 
@@ -89,7 +95,7 @@ function run(gameId: string) {
       bar.replaceChildren(
         h('span', { class: 'practice-title' }, '🏁 Finished'),
         h('button', { class: 'btn btn-primary btn-small', onClick: () => run(gameId) }, 'Race again'),
-        h('a', { class: 'btn btn-link', href: '/play/' }, 'Join a room'),
+        h('a', { class: 'btn btn-link', href: other }, obstacles ? 'Try classic' : 'Try obstacles'),
       );
     }
   }, TICK_MS);

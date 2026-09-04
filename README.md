@@ -132,7 +132,9 @@ can be unit-tested with `node:test` (`pnpm test`).
   player saw is what gets scored; the phone runs ahead of the server, keeps its own short
   history, and only adopts a server snapshot when the two disagree (then replays its
   newer inputs on top). Reloading mid-race picks the table up from the next snapshot.
-- **Obstacle waves** keep it chaotic. After a six-second grace, nine-second waves roll
+- **Obstacle waves** are a per-race option: the room can pass `options.obstacles`, otherwise
+  the server flips a coin when the game starts (the practice page decides on load, with
+  `?obstacles=on|off` to force it). When on, after a six-second grace, nine-second waves roll
   through in a seed-dependent order: a *sweeper* post sliding across the lane, a *double
   sweeper* on two rows, a *windmill* turning in the middle of the pyramid, and *lids* that
   cover one zone's holes at a time. Waves fade in intangible so they never land on a ball,

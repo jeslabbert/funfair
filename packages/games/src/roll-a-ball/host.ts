@@ -190,8 +190,9 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       state = next;
       players = new Map(playerList.map((p) => [p.id, p]));
       renderFeed();
-      waveEl.hidden = !next.wave;
-      if (next.wave) waveEl.textContent = `⚠ ${next.wave.name} on the tables`;
+      waveEl.hidden = false;
+      waveEl.textContent = next.wave ? `⚠ ${next.wave.name} on the tables` : next.obstacles ? '⚠ Obstacles on' : 'Classic table · no obstacles';
+      waveEl.classList.toggle('rab-wave-off', !next.obstacles);
     },
     destroy() {
       cancelAnimationFrame(raf);
