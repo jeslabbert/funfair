@@ -1,0 +1,154 @@
+/* ---- Host screen ---- */
+.rab-host {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+}
+.rab-track-wrap {
+  position: relative;
+  min-height: 0;
+  background: linear-gradient(180deg, #14183a, #0f1230);
+  border: 2px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  overflow: hidden;
+}
+.rab-track {
+  display: block;
+  position: absolute;
+  inset: 0;
+}
+.rab-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 18px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 2px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+}
+.rab-side h2 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+.rab-side-hint {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.95rem;
+  line-height: 1.35;
+}
+.rab-feed {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+.rab-feed-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border-left: 4px solid var(--c);
+  animation: rab-feed-in 0.25s ease-out;
+}
+.rab-feed-item:first-child {
+  background: rgba(255, 255, 255, 0.12);
+}
+.rab-feed-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rab-feed-result {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.rab-feed-hit .rab-feed-result {
+  color: #5ce07a;
+}
+.rab-feed-wide .rab-feed-result,
+.rab-feed-short .rab-feed-result,
+.rab-feed-gutter .rab-feed-result {
+  color: #ff8a8a;
+}
+@keyframes rab-feed-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (max-width: 900px) {
+  .rab-host {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto;
+  }
+  .rab-feed {
+    max-height: 120px;
+  }
+}
+
+/* ---- Phone controller ---- */
+.rab-ctl {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  gap: 8px;
+}
+.rab-ctl-top {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 4px 0;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.rab-ctl-bar {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.rab-ctl-bar-leader,
+.rab-ctl-bar-me {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  transition: width 0.25s ease-out;
+}
+.rab-ctl-bar-leader {
+  background: rgba(255, 255, 255, 0.3);
+}
+.rab-ramp {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: block;
+  touch-action: none;
+  border-radius: 20px;
+  background: radial-gradient(ellipse at 50% 20%, #1c2150, #0e1130 70%);
+  border: 2px solid rgba(255, 255, 255, 0.08);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.rab-ctl-hint {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 0.95rem;
+  min-height: 1.3em;
+}
