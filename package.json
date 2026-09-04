@@ -1,0 +1,22 @@
+{
+  "name": "funfair",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Carnival-style party games: a big-screen host plus phones as controllers.",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel --stream run dev",
+    "build": "pnpm -r run build",
+    "start": "pnpm --filter @funfair/server run start",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
