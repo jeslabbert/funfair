@@ -39,6 +39,15 @@
   font-size: 0.95rem;
   line-height: 1.35;
 }
+.rab-wave {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(255, 231, 76, 0.18);
+  border: 1px solid rgba(255, 231, 76, 0.5);
+  color: #ffe74c;
+  font-weight: 700;
+}
 .rab-feed {
   list-style: none;
   margin: 8px 0 0;

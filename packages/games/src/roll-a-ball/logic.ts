@@ -84,6 +84,8 @@ export const PHYSICS = {
   maxLateralRatio: 0.6,
   /** Ball-on-ball collisions. */
   ballRestitution: 0.8,
+  /** Ball-on-peg collisions. */
+  pegRestitution: 0.6,
   stepMs: 1000 / 120,
   maxDurationMs: 8000,
 } as const;
@@ -123,6 +125,133 @@ export const HOLES: readonly Hole[] = (() => {
   }
   return holes;
 })();
+
+/* ------------------------------------------------------------------------ */
+/* Obstacles: a pure function of the race tick and a per-race seed, so the    */
+/* phone and the server always agree on where everything is.                 */
+/* ------------------------------------------------------------------------ */
+
+/** Quiet time before the first obstacle wave. */
+export const OBSTACLE_GRACE_TICKS = 720; // 6 s
+/** Length of one wave. */
+export const WAVE_TICKS = 1080; // 9 s
+/** A wave fades in (intangible) and out over this long. */
+export const WAVE_FADE_TICKS = 60; // 0.5 s
+
+export type WaveKind = 'peg' | 'windmill' | 'lids' | 'pegs2';
+export const WAVE_KINDS: readonly WaveKind[] = ['peg', 'windmill', 'lids', 'pegs2'];
+export const WAVE_NAMES: Record<WaveKind, string> = { peg: 'Sweeper', windmill: 'Windmill', lids: 'Lids', pegs2: 'Double sweeper' };
+
+export interface Wave {
+  kind: WaveKind;
+  index: number;
+  /** Ticks into the wave. */
+  t: number;
+  /** 0..1 visibility; obstacles only touch balls at 1. */
+  alpha: number;
+}
+
+/** Which wave is on (or arriving / leaving) at a tick. */
+export function waveAt(tick: number, seed: number): Wave | null {
+  if (tick < OBSTACLE_GRACE_TICKS) return null;
+  const since = tick - OBSTACLE_GRACE_TICKS;
+  const index = Math.floor(since / WAVE_TICKS);
+  const t = since - index * WAVE_TICKS;
+  const start = seed & 3;
+  const step = 1 + 2 * ((seed >> 3) & 1); // 1 or 3: both walk every kind
+  const kind = WAVE_KINDS[(start + index * step) % WAVE_KINDS.length]!;
+  const alpha = t < WAVE_FADE_TICKS ? t / WAVE_FADE_TICKS : t >= WAVE_TICKS - WAVE_FADE_TICKS ? (WAVE_TICKS - t) / WAVE_FADE_TICKS : 1;
+  return { kind, index, t, alpha };
+}
+
+const TAU = 6.283185307179586;
+
+/** Sine from arithmetic only (Bhaskara), so every JavaScript engine agrees on the last bit. */
+export function sinA(x: number): number {
+  x = x - Math.floor(x / TAU) * TAU;
+  let sign = 1;
+  if (x > Math.PI) {
+    x -= Math.PI;
+    sign = -1;
+  }
+  const k = x * (Math.PI - x);
+  return (sign * (16 * k)) / (5 * Math.PI * Math.PI - 4 * k);
+}
+export const cosA = (x: number) => sinA(x + Math.PI / 2);
+
+/** A round post the balls bounce off. Velocity is in board units per second. */
+export interface Peg {
+  id: string;
+  x: number;
+  y: number;
+  r: number;
+  vx: number;
+  vy: number;
+}
+
+export interface Windmill {
+  x: number;
+  y: number;
+  /** Radians. */
+  angle: number;
+  spokes: number;
+  reach: number;
+}
+
+export interface Obstacles {
+  wave: Wave | null;
+  /** True while the wave is fully in – only then does it touch balls. */
+  tangible: boolean;
+  pegs: Peg[];
+  windmill: Windmill | null;
+  /** Indices into HOLES that are covered. */
+  closed: number[];
+}
+
+const NONE: Obstacles = { wave: null, tangible: false, pegs: [], windmill: null, closed: [] };
+
+function pegPositions(kind: WaveKind, t: number): { id: string; x: number; y: number; r: number }[] {
+  switch (kind) {
+    case 'peg':
+      return [{ id: 'p0', x: 2.2 * sinA((TAU * t) / 360), y: 6.1, r: 0.34 }];
+    case 'pegs2':
+      return [
+        { id: 'p0', x: 2.0 * sinA((TAU * t) / 330), y: 6.1, r: 0.3 },
+        { id: 'p1', x: -1.4 * sinA((TAU * t) / 270), y: 8.1, r: 0.3 },
+      ];
+    case 'windmill': {
+      const hub = { x: 0, y: 7.1 };
+      const angle = (TAU * t) / 300;
+      const out = [];
+      for (let i = 0; i < 3; i++) {
+        const a = angle + (i * TAU) / 3;
+        out.push({ id: `w${i}`, x: hub.x + 0.95 * cosA(a), y: hub.y + 0.95 * sinA(a), r: 0.27 });
+      }
+      return out;
+    }
+    default:
+      return [];
+  }
+}
+
+export function obstaclesAt(tick: number, seed: number): Obstacles {
+  const wave = waveAt(tick, seed);
+  if (!wave) return NONE;
+  const tangible = wave.alpha >= 1;
+  const now = pegPositions(wave.kind, wave.t);
+  const before = pegPositions(wave.kind, wave.t - 1);
+  const after = pegPositions(wave.kind, wave.t + 1);
+  const perSec = 1000 / PHYSICS.stepMs / 2;
+  const pegs: Peg[] = now.map((p, i) => ({ ...p, vx: (after[i]!.x - before[i]!.x) * perSec, vy: (after[i]!.y - before[i]!.y) * perSec }));
+  const windmill = wave.kind === 'windmill' ? { x: 0, y: 7.1, angle: (TAU * wave.t) / 300, spokes: 3, reach: 0.95 } : null;
+  let closed: number[] = [];
+  if (wave.kind === 'lids') {
+    // Every two seconds the lids move on to the next zone: walk, trot, gallop.
+    const zone: Zone = (['walk', 'trot', 'gallop'] as const)[Math.floor(wave.t / 240) % 3]!;
+    closed = HOLES.map((h, i) => (h.zone === zone ? i : -1)).filter((i) => i >= 0);
+  }
+  return { wave, tangible, pegs, windmill, closed };
+}
 
 /** hit = dropped into a hole; gutter = flew off the back; back = rolled back to the bumper. */
 export type RollKind = 'hit' | 'gutter' | 'back';
@@ -165,10 +294,12 @@ export interface BallState {
 
 export interface TableState {
   tick: number;
+  /** Per-race seed that picks the obstacle order. */
+  seed: number;
   balls: BallState[];
 }
 
-export type TableEventType = 'lip' | 'skip' | 'rail' | 'bumper' | 'ball' | 'hit' | 'gutter' | 'settle' | 'return' | 'launch';
+export type TableEventType = 'lip' | 'skip' | 'rail' | 'bumper' | 'ball' | 'peg' | 'hit' | 'gutter' | 'settle' | 'return' | 'launch';
 
 export interface TableEvent {
   tick: number;
@@ -224,12 +355,12 @@ function newBall(id: number, x: number, y: number): BallState {
   return { id, x, y, vx: 0, vy: 0, status: 'resting', frozen: true, onBumper: true, inside: [], grace: [], returnsAt: -1, launchTick: -1, crossedLip: false };
 }
 
-export function createTable(): TableState {
-  return { tick: 0, balls: BALL_START_XS.map((x, id) => newBall(id, x, BOARD.ballStartY)) };
+export function createTable(seed = 0): TableState {
+  return { tick: 0, seed: seed >>> 0, balls: BALL_START_XS.map((x, id) => newBall(id, x, BOARD.ballStartY)) };
 }
 
 export function cloneTable(t: TableState): TableState {
-  return { tick: t.tick, balls: t.balls.map((b) => ({ ...b, inside: [...b.inside], grace: [...b.grace] })) };
+  return { tick: t.tick, seed: t.seed, balls: t.balls.map((b) => ({ ...b, inside: [...b.inside], grace: [...b.grace] })) };
 }
 
 /** Two tables are the same if every ball matches to floating-point noise. */
@@ -315,6 +446,7 @@ export function stepTable(t: TableState, events: TableEvent[]): void {
   const tick = t.tick;
   const balls = t.balls;
   const onTable = (b: BallState) => b.status === 'resting' || b.status === 'rolling';
+  const obstacles = obstaclesAt(tick, t.seed);
 
   // Integrate the moving bodies
   for (const b of balls) {
@@ -378,6 +510,32 @@ export function stepTable(t: TableState, events: TableEvent[]): void {
     }
   }
 
+  // Pegs: heavy moving posts – push the ball out and bounce it off, relative to the peg's motion.
+  if (obstacles.tangible && obstacles.pegs.length) {
+    for (const b of balls) {
+      if (!onTable(b) || b.frozen) continue;
+      for (const peg of obstacles.pegs) {
+        const dx = b.x - peg.x;
+        const dy = b.y - peg.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        const minD = ballRadius + peg.r;
+        if (d >= minD) continue;
+        const nx = d > 1e-6 ? dx / d : 0;
+        const ny = d > 1e-6 ? dy / d : 1;
+        b.x = peg.x + nx * minD;
+        b.y = peg.y + ny * minD;
+        const vn = (b.vx - peg.vx) * nx + (b.vy - peg.vy) * ny;
+        if (vn < 0) {
+          b.vx -= (1 + PHYSICS.pegRestitution) * vn * nx;
+          b.vy -= (1 + PHYSICS.pegRestitution) * vn * ny;
+        }
+        b.frozen = false;
+        if (b.y > BOARD.ballStartY + 0.02) b.onBumper = false;
+        events.push({ tick, type: 'peg', ball: b.id, x: b.x, y: b.y });
+      }
+    }
+  }
+
   // Ball on ball: push apart, swap the approaching part of their velocities (equal masses).
   for (let i = 0; i < balls.length; i++) {
     const p = balls[i]!;
@@ -434,7 +592,8 @@ export function stepTable(t: TableState, events: TableEvent[]): void {
     for (let h = 0; h < HOLES.length; h++) {
       const hole = HOLES[h]!;
       const dy = b.y - hole.y;
-      if (dy > captureRadius || dy < -captureRadius) {
+      if (dy > captureRadius || dy < -captureRadius || (obstacles.tangible && obstacles.closed.includes(h))) {
+        // Out of reach, or under a lid: the ball just rolls over it.
         removeFrom(b.inside, h);
         continue;
       }
@@ -553,6 +712,8 @@ export interface RollABallHostState {
   racers: RacerState[];
   feed: FeedEntry[];
   winnerId: string | null;
+  /** The obstacle wave on the tables right now. */
+  wave: { kind: WaveKind; name: string; t: number; alpha: number } | null;
 }
 
 export interface RollABallPlayerState {

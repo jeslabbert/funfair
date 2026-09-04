@@ -132,6 +132,13 @@ can be unit-tested with `node:test` (`pnpm test`).
   player saw is what gets scored; the phone runs ahead of the server, keeps its own short
   history, and only adopts a server snapshot when the two disagree (then replays its
   newer inputs on top). Reloading mid-race picks the table up from the next snapshot.
+- **Obstacle waves** keep it chaotic. After a six-second grace, nine-second waves roll
+  through in a seed-dependent order: a *sweeper* post sliding across the lane, a *double
+  sweeper* on two rows, a *windmill* turning in the middle of the pyramid, and *lids* that
+  cover one zone's holes at a time. Waves fade in intangible so they never land on a ball,
+  the phone flashes a warning and the big screen shows a banner. Obstacles are a pure
+  function of the tick and the race seed (with an arithmetic-only sine), so both sides
+  agree on them without sending anything.
 - Every point moves the player's horse one unit along a 30-unit track on the big screen.
   First across the line wins; the rest are ranked by distance.
 - Tuning knobs, all in `logic.ts`: `BOARD` (geometry), `PHYSICS` (`slope`, `friction`,

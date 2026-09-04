@@ -13,9 +13,13 @@ import {
   grabBall,
   launchBall,
   msToTick,
+  obstaclesAt,
   ordinal,
   stepTable,
   tablesMatch,
+  WAVE_FADE_TICKS,
+  WAVE_NAMES,
+  type Obstacles,
   type BallState,
   type RollABallInput,
   type RollABallPlayerState,
@@ -344,6 +348,11 @@ export function mountRollABallController(
       case 'ball':
         buzz(6);
         break;
+      case 'peg':
+        labels.push({ text: 'bonk!', color: '#ff8a8a', x: ev.x, y: ev.y, at: now });
+        lastHopAt.set(ev.ball, now);
+        buzz(14);
+        break;
       case 'hit': {
         const hole = HOLES[ev.hole!]!;
         sinks.push({ id: ev.ball, from: { x: ev.x, y: ev.y }, hole: { ...toCanvasHole(hole), zone: hole.zone }, at: now });
@@ -410,7 +419,9 @@ export function mountRollABallController(
     advanceLocal(now);
     updateSpins();
     drawBoard();
-    drawHoles();
+    const obstacles = table ? obstaclesAt(table.tick, table.seed) : null;
+    drawHoles(obstacles);
+    if (obstacles) drawObstacles(obstacles, now);
     drawBalls(now);
     drawLabels(now);
     drawPopup(now);
@@ -544,12 +555,130 @@ export function mountRollABallController(
     return { rx, ry: rx * SQUASH, lip: unitAt(y) * 0.12 };
   }
 
-  function drawHoles() {
-    for (const h of HOLES) {
+  function drawHoles(obstacles: Obstacles | null) {
+    HOLES.forEach((h, i) => {
       const { x, y } = toCanvas(h.x, h.y);
       drawHole(x, y, h.zone);
-    }
+      if (obstacles && obstacles.closed.includes(i)) drawLid(x, y, obstacles.wave?.alpha ?? 1);
+    });
   }
+
+  /** A metal cover sliding over a hole. */
+  function drawLid(x: number, y: number, alpha: number) {
+    const { rx, ry } = holeSize(y);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    ctx.ellipse(x, y, rx * 1.02, ry * 1.02, 0, 0, Math.PI * 2);
+    const g = ctx.createLinearGradient(x - rx, y - ry, x + rx, y + ry);
+    g.addColorStop(0, '#9aa3b2');
+    g.addColorStop(0.5, '#5f6775');
+    g.addColorStop(1, '#8d97a6');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // Rivets
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    for (const [ox, oy] of [[-0.55, 0], [0.55, 0], [0, -0.55], [0, 0.55]] as const) {
+      ctx.beginPath();
+      ctx.arc(x + ox * rx, y + oy * ry, Math.max(1.5, rx * 0.09), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawObstacles(o: Obstacles, now: number) {
+    const alpha = o.wave?.alpha ?? 0;
+    if (!o.wave) return;
+    if (o.windmill) {
+      const hub = toCanvas(o.windmill.x, o.windmill.y);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      // Spokes
+      ctx.lineWidth = Math.max(3, unitAt(hub.y) * 0.1);
+      ctx.strokeStyle = '#3b2a1a';
+      for (const peg of o.pegs) {
+        const p = toCanvas(peg.x, peg.y);
+        ctx.beginPath();
+        ctx.moveTo(hub.x, hub.y);
+        ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+      }
+      // Hub
+      const hr = unitAt(hub.y) * 0.22;
+      ctx.beginPath();
+      ctx.ellipse(hub.x, hub.y, hr, hr * SQUASH, 0, 0, Math.PI * 2);
+      ctx.fillStyle = '#2a1e12';
+      ctx.fill();
+      ctx.restore();
+    }
+    for (const peg of o.pegs) drawPeg(peg.x, peg.y, peg.r, alpha, o.wave.kind === 'windmill');
+    // Warning while a wave arrives
+    if (o.wave.t < WAVE_FADE_TICKS * 3) {
+      const u = o.wave.t / (WAVE_FADE_TICKS * 3);
+      const mid = toCanvas(0, (BOARD.rampLength + BOARD.gutterY) / 2);
+      ctx.save();
+      ctx.globalAlpha = 1 - u * u;
+      ctx.fillStyle = '#ffe74c';
+      fitFont(ctx, `⚠ ${WAVE_NAMES[o.wave.kind]}`, 900, Math.max(22, W * 0.09), W * 0.8);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.strokeText(`⚠ ${WAVE_NAMES[o.wave.kind]}`, mid.x, mid.y - u * 20);
+      ctx.fillText(`⚠ ${WAVE_NAMES[o.wave.kind]}`, mid.x, mid.y - u * 20);
+      ctx.restore();
+    }
+    void now;
+  }
+
+  /** A striped carnival post standing on the table. */
+  function drawPeg(bx: number, by: number, r: number, alpha: number, bead: boolean) {
+    const { x, y } = toCanvas(bx, by);
+    const u = unitAt(y);
+    const rx = r * u;
+    const h = bead ? rx * 1.2 : rx * 2.6;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    // Shadow
+    ctx.beginPath();
+    ctx.ellipse(x + rx * 0.3, y + rx * 0.2, rx * 1.15, rx * SQUASH, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fill();
+    // Body: a cylinder from its base ellipse up to its top ellipse
+    ctx.beginPath();
+    ctx.moveTo(x - rx, y);
+    ctx.lineTo(x - rx, y - h);
+    ctx.ellipse(x, y - h, rx, rx * SQUASH, 0, Math.PI, 0, false);
+    ctx.lineTo(x + rx, y);
+    ctx.ellipse(x, y, rx, rx * SQUASH, 0, 0, Math.PI, false);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(x - rx, 0, x + rx, 0);
+    if (bead) {
+      g.addColorStop(0, '#5a3a8a');
+      g.addColorStop(0.4, '#a77ce0');
+      g.addColorStop(1, '#3a2360');
+    } else {
+      g.addColorStop(0, '#b3261e');
+      g.addColorStop(0.35, '#ff6b5e');
+      g.addColorStop(0.65, '#ffffff');
+      g.addColorStop(1, '#b3261e');
+    }
+    ctx.fillStyle = g;
+    ctx.fill();
+    // Top
+    ctx.beginPath();
+    ctx.ellipse(x, y - h, rx, rx * SQUASH, 0, 0, Math.PI * 2);
+    ctx.fillStyle = bead ? '#c9a8ff' : '#ffd6d1';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  }
+
 
   function drawHole(x: number, y: number, zone: Zone) {
     const { rx, ry, lip } = holeSize(y);

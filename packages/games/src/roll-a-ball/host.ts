@@ -12,6 +12,7 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       <aside class="rab-side">
         <h2>Roll-a-Ball Derby</h2>
         <p class="rab-side-hint">Roll the ball up the slope into the pyramid: front holes walk (+1), the arrow trots (+2), the back triangle gallops (+3). Too soft and it rolls back, too hard and it skips the lip. First to the finish wins.</p>
+        <p class="rab-wave" hidden></p>
         <ol class="rab-feed"></ol>
       </aside>
     </div>`;
@@ -19,6 +20,7 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
   const canvas = root.querySelector<HTMLCanvasElement>('.rab-track')!;
   const wrap = root.querySelector<HTMLElement>('.rab-track-wrap')!;
   const feedEl = root.querySelector<HTMLOListElement>('.rab-feed')!;
+  const waveEl = root.querySelector<HTMLElement>('.rab-wave')!;
   const ctx = canvas.getContext('2d')!;
 
   let state: RollABallHostState | null = null;
@@ -134,6 +136,22 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       ctx.fillText(label, x, yc - size * 0.72);
     });
 
+    // Obstacle wave arriving: a banner across the track
+    if (state.wave && state.phase === 'racing' && state.wave.t < 200) {
+      const u = state.wave.t / 200;
+      ctx.save();
+      ctx.globalAlpha = 1 - u * u;
+      ctx.fillStyle = 'rgba(255, 231, 76, 0.92)';
+      const bh = Math.min(90, H * 0.12);
+      ctx.fillRect(0, H * 0.44 - bh / 2 - u * 30, W, bh);
+      ctx.fillStyle = '#2a1600';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `900 ${Math.min(52, W * 0.04)}px system-ui, sans-serif`;
+      ctx.fillText(`⚠ ${state.wave.name.toUpperCase()} INCOMING`, W / 2, H * 0.44 - u * 30);
+      ctx.restore();
+    }
+
     // Overlays
     if (state.phase === 'countdown') {
       const secs = Math.ceil(state.countdownMs / 1000);
@@ -172,6 +190,8 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       state = next;
       players = new Map(playerList.map((p) => [p.id, p]));
       renderFeed();
+      waveEl.hidden = !next.wave;
+      if (next.wave) waveEl.textContent = `⚠ ${next.wave.name} on the tables`;
     },
     destroy() {
       cancelAnimationFrame(raf);

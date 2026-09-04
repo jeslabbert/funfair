@@ -7,17 +7,24 @@ import {
   COUNTDOWN_MS,
   FINISH_LINGER_MS,
   HOLES,
+  OBSTACLE_GRACE_TICKS,
   PHYSICS,
   ROWS,
   TRACK_LENGTH,
+  WAVE_FADE_TICKS,
+  WAVE_KINDS,
+  WAVE_TICKS,
   clampLaunch,
   clampLaunchPosition,
   cloneTable,
   createTable,
   grabBall,
   launchBall,
+  obstaclesAt,
   ordinal,
+  sinA,
   stepTable,
+  waveAt,
   tableBusy,
   tablesMatch,
   type TableEvent,
@@ -221,6 +228,81 @@ test('a held ball takes no part in the physics', () => {
   run(table, events);
   assert.ok(!types(events).includes('ball'));
   assert.ok(launchBall(table, { ball: 1, x: 0, y: 1, vx: 0, vy: 0 }));
+});
+
+test('obstacle waves follow the tick and the seed', () => {
+  assert.equal(waveAt(0, 7), null);
+  assert.equal(waveAt(OBSTACLE_GRACE_TICKS - 1, 7), null);
+  for (const seed of [0, 1, 5, 12, 999]) {
+    const kinds = new Set<string>();
+    for (let i = 0; i < WAVE_KINDS.length; i++) kinds.add(waveAt(OBSTACLE_GRACE_TICKS + i * WAVE_TICKS + 100, seed)!.kind);
+    assert.equal(kinds.size, WAVE_KINDS.length, `seed ${seed} shows every wave`);
+  }
+  const w = waveAt(OBSTACLE_GRACE_TICKS + 10, 3)!;
+  assert.ok(w.alpha > 0 && w.alpha < 1, 'fading in');
+  assert.equal(waveAt(OBSTACLE_GRACE_TICKS + WAVE_FADE_TICKS, 3)!.alpha, 1);
+  assert.ok(!obstaclesAt(OBSTACLE_GRACE_TICKS + 10, 3).tangible);
+  assert.ok(obstaclesAt(OBSTACLE_GRACE_TICKS + WAVE_FADE_TICKS, 3).tangible);
+  // Deterministic and between the rails.
+  for (let tick = OBSTACLE_GRACE_TICKS; tick < OBSTACLE_GRACE_TICKS + WAVE_TICKS * 4; tick += 37) {
+    const a = obstaclesAt(tick, 42);
+    const b = obstaclesAt(tick, 42);
+    assert.deepEqual(a, b);
+    for (const peg of a.pegs) assert.ok(Math.abs(peg.x) + peg.r <= BOARD.halfWidth);
+  }
+  // The arithmetic sine is close enough to the real one.
+  for (let x = -7; x < 7; x += 0.13) assert.ok(Math.abs(sinA(x) - Math.sin(x)) < 0.002);
+});
+
+/** First tick at which a wave of this kind is fully in, for a seed. */
+function waveStart(kind: string, seed: number): number {
+  for (let i = 0; i < WAVE_KINDS.length; i++) {
+    const tick = OBSTACLE_GRACE_TICKS + i * WAVE_TICKS;
+    if (waveAt(tick, seed)!.kind === kind) return tick;
+  }
+  throw new Error('no such wave');
+}
+
+test('a sweeper post knocks a ball back', () => {
+  const seed = 42;
+  const table = createTable(seed);
+  // Half-way through its sweep the post crosses the centre line.
+  table.tick = waveStart('peg', seed) + 180 - 1;
+  assert.ok(Math.abs(obstaclesAt(table.tick + 1, seed).pegs[0]!.x) < 0.05);
+  const events: TableEvent[] = [];
+  // Aim at where the post will be when the ball gets there.
+  const meet = obstaclesAt(table.tick + 16, seed).pegs[0]!.x;
+  launchBall(table, { ball: 1, x: meet, y: 4.7, vx: 0, vy: 12 }, events);
+  for (let i = 0; i < 60; i++) stepTable(table, events);
+  const bonk = events.find((e) => e.type === 'peg');
+  assert.ok(bonk, 'ball hit the post');
+  const ball = table.balls[1]!;
+  assert.ok(ball.vy < 0, 'and is heading back down');
+  assert.ok(ball.y < 6.1, 'from below it');
+});
+
+test('a lid over a hole makes the ball roll straight over it', () => {
+  const seed = 42;
+  const start = waveStart('lids', seed);
+  // Walk holes are covered during the first two seconds of the wave.
+  const table = createTable(seed);
+  table.tick = start + WAVE_FADE_TICKS;
+  const closed = obstaclesAt(table.tick + 1, seed).closed;
+  assert.ok(closed.length === 5 && closed.every((i) => HOLES[i]!.zone === 'walk'));
+  const events: TableEvent[] = [];
+  launchBall(table, { ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.55) }, events);
+  let peak = 0;
+  // Stay inside the two seconds the walk lids are down.
+  for (let i = 0; i < 170; i++) {
+    stepTable(table, events);
+    peak = Math.max(peak, table.balls[1]!.y);
+  }
+  assert.ok(peak > HOLES[2]!.y - PHYSICS.captureRadius, 'the ball reached the covered hole');
+  assert.ok(!events.some((e) => e.type === 'hit'), 'nothing caught it while covered');
+  assert.ok(!events.some((e) => e.type === 'lip' || e.type === 'skip'), 'no lip either: it rolled straight over');
+  // Without the lids the same roll is a walk.
+  const plain = roll(0.55);
+  assert.equal(HOLES[hits(plain.events, 1)[0]!.hole!]!.zone, 'walk');
 });
 
 test('ordinal', () => {
