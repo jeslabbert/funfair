@@ -4,13 +4,15 @@ import {
   BOARD,
   HOLES,
   PHYSICS,
-  RETURN_DELAY_MS,
   ZONE_LABEL,
   ZONE_POINTS,
   clamp,
   clampLaunch,
+  clampLaunchPosition,
   ordinal,
   simulateRoll,
+  type BallAtRest,
+  type BallView,
   type RollABallInput,
   type RollABallPlayerState,
   type RollEvent,
@@ -18,7 +20,6 @@ import {
   type RollSimulation,
   type Zone,
 } from './logic';
-
 import { QUAT_IDENTITY, createBallRenderer, quatFromAxisAngle, quatMultiply, quatNormalize, type Quat } from './ball3d';
 
 export const ZONE_COLORS: Record<Zone, string> = { walk: '#5ce07a', trot: '#ffb547', gallop: '#ff5c5c' };
@@ -28,11 +29,12 @@ const POWER_SCALE = 8;
 /** Swipe length, as a fraction of the canvas height, that counts as a full-power pull. */
 const DISTANCE_SCALE = 0.75;
 const MIN_FLICK_PX = 24;
-const VELOCITY_WINDOW_MS = 120;
+const VELOCITY_WINDOW_MS = 180;
 const POPUP_MS = 900;
 const LABEL_MS = 650;
 const SINK_MS = 340;
 const HOP_MS = 160;
+const APPEAR_MS = 260;
 /** Vertical squash of circles on the receding table (viewing angle). */
 const SQUASH = 0.68;
 
@@ -47,6 +49,8 @@ interface Flight {
   /** performance.now() at launch. */
   launchedAt: number;
   rollsBefore: number;
+  /** True when the roll never left the ramp: the server won't count it, so don't wait for it to. */
+  isDrop: boolean;
   /** Set once the server confirms the roll. */
   confirmed: { points: number; kind: RollKind; zone: Zone | null } | null;
   popupAt: number | null;
@@ -56,11 +60,22 @@ interface Flight {
   skipShown: boolean;
 }
 
+interface Drag {
+  ballId: number;
+  pointerId: number;
+  /** Board units. */
+  x: number;
+  y: number;
+  samples: Sample[];
+}
+
 interface BallPose {
+  id: number;
   x: number;
   y: number;
   scale: number;
   alpha: number;
+  lifted: boolean;
   /** Hole the ball is sinking into, once caught. */
   sinkingInto: { x: number; y: number; zone: Zone } | null;
   sink: number; // 0..1
@@ -72,6 +87,12 @@ interface FloatingLabel {
   x: number; // board units
   y: number;
   at: number;
+}
+
+interface Spin2D {
+  spin: number;
+  dirX: number;
+  dirY: number;
 }
 
 export function mountRollABallController(
@@ -89,7 +110,7 @@ export function mountRollABallController(
         <div class="rab-ctl-score">0 / 30</div>
       </div>
       <canvas class="rab-ramp"></canvas>
-      <div class="rab-ctl-hint">Flick the ball up the ramp</div>
+      <div class="rab-ctl-hint">Grab a ball and flick it up the ramp</div>
     </div>`;
 
   const el = root.querySelector<HTMLElement>('.rab-ctl')!;
@@ -105,20 +126,20 @@ export function mountRollABallController(
   let me: PlayerInfo | null = null;
   let players = new Map<string, PlayerInfo>();
   let flight: Flight | null = null;
+  let drag: Drag | null = null;
   let labels: FloatingLabel[] = [];
-  let lastHopAt = -Infinity;
-  /** Rolling state: the ball's orientation, plus a scalar spin/direction for the 2D fallback. */
-  let orientation: Quat = QUAT_IDENTITY;
-  let spin = 0;
-  let spinDirX = 0;
-  let spinDirY = -1;
-  let prevBoard: { x: number; y: number } | null = null;
-  const ball3d = createBallRenderer();
-  let samples: Sample[] = [];
-  let dragging = false;
   let raf = 0;
   let W = 0;
   let H = 0;
+
+  /** Per-ball rolling state, by ball id. */
+  const orientation = new Map<number, Quat>();
+  const spin2d = new Map<number, Spin2D>();
+  const prevBoard = new Map<number, { x: number; y: number }>();
+  const lastHopAt = new Map<number, number>();
+  /** When each ball last (re)appeared on the table, for a fade-in. */
+  const appearedAt = new Map<number, number>();
+  const ball3d = createBallRenderer();
 
   const ro = new ResizeObserver(() => resize());
   ro.observe(canvas);
@@ -132,93 +153,141 @@ export function mountRollABallController(
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  // ---- board units → canvas --------------------------------------------
-  // y = 0 is the bottom of the ramp (ball in hand), y = gutterY the back edge.
+  // ---- board units ↔ canvas -------------------------------------------
+  // y = 0 is the bottom of the ramp, y = gutterY the back edge.
   const legendY = () => H * 0.04;
   const topY = () => H * 0.12;
   const bottomY = () => H * 0.94;
   const cx = () => W / 2;
   const yTo = (by: number) => bottomY() - (by / BOARD.gutterY) * (bottomY() - topY());
+  const yFrom = (cy: number) => ((bottomY() - cy) / (bottomY() - topY())) * BOARD.gutterY;
   /** Half-width of the board at a canvas y – narrower towards the back for a little perspective. */
   const halfWidthAt = (cy: number) => {
     const t = clamp((bottomY() - cy) / (bottomY() - topY()), 0, 1);
     return W * (0.47 - 0.16 * t);
   };
   const unitAt = (cy: number) => halfWidthAt(cy) / BOARD.halfWidth;
-  const xTo = (bx: number, cy: number) => cx() + bx * unitAt(cy);
   const toCanvas = (bx: number, by: number) => {
     const cy = yTo(by);
-    return { x: xTo(bx, cy), y: cy };
+    return { x: cx() + bx * unitAt(cy), y: cy };
   };
-  const restPoint = () => toCanvas(0, BOARD.ballStartY);
+  const fromCanvas = (px: number, py: number) => {
+    const by = yFrom(py);
+    return { x: (px - cx()) / unitAt(py), y: by };
+  };
+  const ballPx = (cy: number) => unitAt(cy) * PHYSICS.ballRadius * 1.15;
+
+  // ---- what's on the table right now ---------------------------------
+  /** Balls at rest, from the live roll's final positions once it has settled, else the server's view. */
+  function restingBalls(): BallView[] {
+    if (flight) {
+      return flight.sim.final.map((b) => ({ ...b, status: 'resting' as const }));
+    }
+    return state?.me.balls.filter((b) => b.status === 'resting') ?? [];
+  }
+
+  function tableLive(now: number) {
+    return !!flight && now - flight.launchedAt < flight.sim.outcome.endedAt;
+  }
+
+  function canGrab(now: number) {
+    if (!state || state.phase !== 'racing' || state.me.finishedAt !== null || drag) return false;
+    if (flight) return false;
+    return state.cooldownMs === 0 && state.me.flight === null;
+  }
 
   // ---- input --------------------------------------------------------------
-  function ballReady(now: number) {
-    if (!state || state.phase !== 'racing' || state.me.finishedAt !== null) return false;
-    if (flight) return now - flight.launchedAt >= flight.sim.outcome.endedAt + RETURN_DELAY_MS;
-    return state.cooldownMs === 0;
+  function pointerPos(e: PointerEvent) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
   canvas.addEventListener('pointerdown', (e) => {
-    if (!ballReady(performance.now())) return;
-    dragging = true;
-    samples = [{ x: e.clientX, y: e.clientY, t: e.timeStamp }];
-    canvas.setPointerCapture(e.pointerId);
+    const now = performance.now();
+    if (!canGrab(now)) return;
+    const p = pointerPos(e);
+    // Nearest resting ball, within a generous reach.
+    let best: BallView | null = null;
+    let bestD = Math.max(60, W * 0.3);
+    for (const b of restingBalls()) {
+      const c = toCanvas(b.x, b.y);
+      const d = Math.hypot(c.x - p.x, c.y - p.y);
+      if (d < bestD) {
+        bestD = d;
+        best = b;
+      }
+    }
+    if (!best) return;
+    const at = clampLaunchPosition(best.x, best.y);
+    drag = { ballId: best.id, pointerId: e.pointerId, x: at.x, y: at.y, samples: [{ x: e.clientX, y: e.clientY, t: e.timeStamp }] };
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      /* synthetic pointer */
+    }
+    buzz(8);
   });
   canvas.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
-    samples.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
-    if (samples.length > 64) samples.splice(0, samples.length - 64);
+    if (!drag || e.pointerId !== drag.pointerId) return;
+    const p = pointerPos(e);
+    const b = clampLaunchPosition(fromCanvas(p.x, p.y).x, fromCanvas(p.x, p.y).y);
+    drag.x = b.x;
+    drag.y = b.y;
+    drag.samples.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
+    if (drag.samples.length > 64) drag.samples.splice(0, drag.samples.length - 64);
   });
   const endDrag = (e: PointerEvent) => {
-    if (!dragging) return;
-    dragging = false;
-    samples.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
-    const gesture = readFlick(samples, H);
-    samples = [];
-    if (!gesture) return;
-    const now = performance.now();
-    if (!ballReady(now)) return;
-    const speed = gesture.power * PHYSICS.maxLaunchSpeed;
-    const launch = clampLaunch(speed * gesture.dirX, speed * gesture.dirY);
-    startFlight(simulateRoll(launch.vx, launch.vy), now, state!.me.rolls);
-    send({ type: 'roll', vx: launch.vx, vy: launch.vy });
+    if (!drag || e.pointerId !== drag.pointerId) return;
+    drag.samples.push({ x: e.clientX, y: e.clientY, t: e.timeStamp });
+    const gesture = readFlick(drag.samples, H);
+    const speed = gesture ? gesture.power * PHYSICS.maxLaunchSpeed : 0;
+    const vel = gesture ? clampLaunch(speed * gesture.dirX, speed * gesture.dirY) : { vx: 0, vy: 0 };
+    const launch = { ball: drag.ballId, x: drag.x, y: drag.y, vx: vel.vx, vy: vel.vy };
+    const atRest: BallAtRest[] = restingBalls().map(({ id, x, y }) => ({ id, x, y }));
+    drag = null;
+    if (!state || state.phase !== 'racing') return;
+    startFlight(simulateRoll(launch, atRest), performance.now(), state.me.rolls);
+    send({ type: 'roll', ...launch });
   };
   canvas.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
 
   function startFlight(sim: RollSimulation, launchedAt: number, rollsBefore: number) {
-    flight = { sim, launchedAt, rollsBefore, confirmed: null, popupAt: null, nextEvent: 0, skipShown: false };
+    const isDrop = sim.outcome.kind === 'back' && sim.outcome.peakY < BOARD.rampLength && sim.captures.length === 0;
+    flight = { sim, launchedAt, rollsBefore, isDrop, confirmed: null, popupAt: null, nextEvent: 0, skipShown: false };
     labels = [];
-    prevBoard = null;
+    prevBoard.clear();
   }
 
-  /** Advance the ball's spin by how far it has rolled since the last frame. */
-  function updateSpin(now: number) {
-    if (!flight) {
-      prevBoard = null;
-      return;
-    }
+  /** Advance each moving ball's spin by how far it rolled since the last frame. */
+  function updateSpins(now: number) {
+    if (!flight) return;
     const { sim } = flight;
+    const n = sim.ids.length;
     const t = now - flight.launchedAt;
-    const last = sim.frames.length / 2 - 1;
+    const last = sim.frames.length / (n * 2) - 1;
     const i = clamp(Math.floor(t / PHYSICS.stepMs), 0, last);
-    const cur = { x: sim.frames[i * 2]!, y: sim.frames[i * 2 + 1]! };
-    if (prevBoard) {
-      const dx = cur.x - prevBoard.x;
-      const dy = cur.y - prevBoard.y;
-      const ds = Math.sqrt(dx * dx + dy * dy);
-      if (ds > 1e-4) {
-        const angle = ds / PHYSICS.ballRadius;
-        spin += angle;
-        // Screen direction: board +y is up the screen.
-        spinDirX = dx / ds;
-        spinDirY = -dy / ds;
-        // A ball rolling along d on a table with normal z turns about z × d.
-        orientation = quatNormalize(quatMultiply(quatFromAxisAngle(-dy, dx, 0, angle), orientation));
+    for (let k = 0; k < n; k++) {
+      const id = sim.ids[k]!;
+      const bx = sim.frames[(i * n + k) * 2]!;
+      const by = sim.frames[(i * n + k) * 2 + 1]!;
+      if (Number.isNaN(bx)) continue;
+      const prev = prevBoard.get(id);
+      if (prev) {
+        const dx = bx - prev.x;
+        const dy = by - prev.y;
+        const ds = Math.sqrt(dx * dx + dy * dy);
+        if (ds > 1e-4) {
+          const angle = ds / PHYSICS.ballRadius;
+          const s = spin2d.get(id) ?? { spin: 0, dirX: 0, dirY: -1 };
+          spin2d.set(id, { spin: s.spin + angle, dirX: dx / ds, dirY: -dy / ds });
+          // A ball rolling along d on a table with normal z turns about z × d.
+          const q = orientation.get(id) ?? QUAT_IDENTITY;
+          orientation.set(id, quatNormalize(quatMultiply(quatFromAxisAngle(-dy, dx, 0, angle), q)));
+        }
       }
+      prevBoard.set(id, { x: bx, y: by });
     }
-    prevBoard = cur;
   }
 
   // ---- drawing ------------------------------------------------------------
@@ -229,8 +298,8 @@ export function mountRollABallController(
     drawBoard();
     drawHoles();
     announceEvents(now);
-    updateSpin(now);
-    drawBall(now);
+    updateSpins(now);
+    drawBalls(now);
     drawLabels(now);
     drawPopup(now);
     drawOverlay();
@@ -275,6 +344,13 @@ export function mountRollABallController(
       ctx.lineTo(cx() + halfWidthAt(y), y);
       ctx.stroke();
     }
+
+    // Front bumper: a raised bar the balls rest against
+    const by0 = yTo(BOARD.ballStartY - PHYSICS.ballRadius);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(cx() - halfWidthAt(by0), by0 - 2, halfWidthAt(by0) * 2, 6);
+    ctx.fillStyle = 'rgba(255, 220, 160, 0.35)';
+    ctx.fillRect(cx() - halfWidthAt(by0), by0 - 4, halfWidthAt(by0) * 2, 2);
 
     // Rails: raised edges with a lit inner face
     ctx.lineWidth = 6;
@@ -415,91 +491,117 @@ export function mountRollABallController(
     return { ...toCanvas(h.x, h.y), zone: h.zone };
   }
 
-  function ballAt(now: number): BallPose | null {
-    if (!flight) return null;
-    const { sim } = flight;
-    const t = now - flight.launchedAt;
-    const ended = sim.outcome.endedAt;
-    if (t >= ended + RETURN_DELAY_MS) return null; // back in hand – drawn at rest
-    const last = sim.frames.length / 2 - 1;
-    const i = clamp(Math.floor(t / PHYSICS.stepMs), 0, last);
-    const { x, y } = toCanvas(sim.frames[i * 2]!, sim.frames[i * 2 + 1]!);
-    if (t < ended) return { x, y, scale: 1, alpha: 1, sinkingInto: null, sink: 0 };
-
-    const s = clamp((t - ended) / SINK_MS, 0, 1);
-    if (sim.outcome.kind === 'hit') {
-      // Slide from where the lip caught it to the centre, then drop through the opening.
-      const hole = holeFor(sim.outcome.row!, sim.outcome.col!);
-      const slide = clamp(s / 0.45, 0, 1);
-      const eased = 1 - Math.pow(1 - slide, 2);
-      const drop = clamp((s - 0.3) / 0.7, 0, 1);
-      const { ry } = holeSize(hole.y);
-      return {
-        x: x + (hole.x - x) * eased,
-        y: y + (hole.y - y) * eased + drop * drop * ry * 2.4,
-        scale: 1 - drop * 0.25,
-        alpha: 1 - clamp((s - 0.75) / 0.25, 0, 1),
-        sinkingInto: hole,
-        sink: drop,
-      };
+  /** Where every ball is on screen this frame. */
+  function poses(now: number): BallPose[] {
+    const out: BallPose[] = [];
+    if (flight) {
+      const { sim } = flight;
+      const n = sim.ids.length;
+      const t = now - flight.launchedAt;
+      const last = sim.frames.length / (n * 2) - 1;
+      const i = clamp(Math.floor(t / PHYSICS.stepMs), 0, last);
+      for (let k = 0; k < n; k++) {
+        const id = sim.ids[k]!;
+        const bx = sim.frames[(i * n + k) * 2]!;
+        const by = sim.frames[(i * n + k) * 2 + 1]!;
+        if (!Number.isNaN(bx)) {
+          const { x, y } = toCanvas(bx, by);
+          out.push({ id, x, y, scale: 1, alpha: 1, lifted: false, sinkingInto: null, sink: 0 });
+          continue;
+        }
+        // Off the table: dropping into a hole or the gutter.
+        const cap = sim.captures.find((c) => c.ball === k);
+        if (cap) {
+          const s = clamp((t - cap.t) / SINK_MS, 0, 1);
+          if (s >= 1) continue;
+          const ev = sim.events.find((e) => e.type === 'hit' && e.ball === k)!;
+          const from = toCanvas(ev.x, ev.y);
+          const hole = holeFor(cap.hole.row, cap.hole.col);
+          const slide = clamp(s / 0.45, 0, 1);
+          const eased = 1 - Math.pow(1 - slide, 2);
+          const drop = clamp((s - 0.3) / 0.7, 0, 1);
+          const { ry } = holeSize(hole.y);
+          out.push({
+            id,
+            x: from.x + (hole.x - from.x) * eased,
+            y: from.y + (hole.y - from.y) * eased + drop * drop * ry * 2.4,
+            scale: 1 - drop * 0.25,
+            alpha: 1 - clamp((s - 0.75) / 0.25, 0, 1),
+            lifted: false,
+            sinkingInto: hole,
+            sink: drop,
+          });
+          continue;
+        }
+        const gut = sim.events.find((e) => e.type === 'gutter' && e.ball === k);
+        if (gut) {
+          const s = clamp((t - gut.t) / SINK_MS, 0, 1);
+          if (s >= 1) continue;
+          const { x, y } = toCanvas(gut.x, gut.y);
+          out.push({ id, x, y: y - s * H * 0.02, scale: 1 - s * 0.6, alpha: 1 - s, lifted: false, sinkingInto: null, sink: 0 });
+        }
+      }
+      return out;
     }
-    if (sim.outcome.kind === 'gutter') return { x, y: y - s * H * 0.02, scale: 1 - s * 0.6, alpha: 1 - s, sinkingInto: null, sink: 0 };
-    // Rolled back: pick it up from where it settled and bring it to hand.
-    const rest = restPoint();
-    const u = clamp((t - ended) / RETURN_DELAY_MS, 0, 1);
-    const eased = u * u * (3 - 2 * u);
-    return { x: x + (rest.x - x) * eased, y: y + (rest.y - y) * eased, scale: 1, alpha: 1, sinkingInto: null, sink: 0 };
+
+    for (const b of state?.me.balls ?? []) {
+      if (b.status !== 'resting') {
+        appearedAt.delete(b.id);
+        continue;
+      }
+      if (!appearedAt.has(b.id)) appearedAt.set(b.id, now);
+      const fade = clamp((now - appearedAt.get(b.id)!) / APPEAR_MS, 0, 1);
+      if (drag && drag.ballId === b.id) {
+        const { x, y } = toCanvas(drag.x, drag.y);
+        out.push({ id: b.id, x, y, scale: 1.12, alpha: 1, lifted: true, sinkingInto: null, sink: 0 });
+      } else {
+        const { x, y } = toCanvas(b.x, b.y);
+        out.push({ id: b.id, x, y, scale: 0.6 + 0.4 * fade, alpha: fade, lifted: false, sinkingInto: null, sink: 0 });
+      }
+    }
+    return out;
   }
 
   /**
-   * A carnival ball: player colour with cream spots on two rings around the
-   * rolling axis, so the spots sweep across the face as it rolls. `angle` is
-   * the spin, `dirX/dirY` the on-screen direction of travel.
+   * A carnival ball for browsers without WebGL: player colour with cream spots
+   * on two rings around the rolling axis, so the spots sweep across the face.
    */
-  function drawSphere(x: number, y: number, r: number, color: string, alpha: number, dim: number, angle: number, dirX: number, dirY: number) {
+  function drawSphere(x: number, y: number, r: number, color: string, alpha: number, dim: number, s: Spin2D) {
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.clip();
-
-    // Base shading: lit top-left, dark rim
     const base = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.15, x, y, r);
     base.addColorStop(0, shade(color, 0.25));
     base.addColorStop(0.6, color);
     base.addColorStop(1, shade(color, -0.65));
     ctx.fillStyle = base;
     ctx.fillRect(x - r, y - r, r * 2, r * 2);
-
-    // Spots: `a` is the rolling axis on screen (perpendicular to travel).
-    const ax = -dirY;
-    const ay = dirX;
+    const ax = -s.dirY;
+    const ay = s.dirX;
     const spotR = r * 0.2;
     for (const ring of [-0.5, 0.5]) {
-      const ringR = Math.sqrt(1 - ring * ring); // radius of the small circle at this latitude
+      const ringR = Math.sqrt(1 - ring * ring);
       for (let k = 0; k < 4; k++) {
-        const th = angle + (k * Math.PI) / 2 + (ring > 0 ? Math.PI / 4 : 0);
-        const depth = Math.cos(th); // >0 faces the viewer
+        const th = s.spin + (k * Math.PI) / 2 + (ring > 0 ? Math.PI / 4 : 0);
+        const depth = Math.cos(th);
         if (depth <= 0.05) continue;
-        const along = Math.sin(th) * ringR; // offset along the direction of travel
-        const sx = x + (ax * ring + dirX * along) * r;
-        const sy = y + (ay * ring + dirY * along) * r;
+        const along = Math.sin(th) * ringR;
+        const sx = x + (ax * ring + s.dirX * along) * r;
+        const sy = y + (ay * ring + s.dirY * along) * r;
         ctx.beginPath();
-        // Foreshortened along the travel direction as the spot turns away.
-        ctx.ellipse(sx, sy, spotR * Math.max(0.15, depth), spotR, Math.atan2(dirY, dirX), 0, Math.PI * 2);
+        ctx.ellipse(sx, sy, spotR * Math.max(0.15, depth), spotR, Math.atan2(s.dirY, s.dirX), 0, Math.PI * 2);
         ctx.fillStyle = `rgba(255, 244, 220, ${0.35 + 0.55 * depth})`;
         ctx.fill();
       }
     }
-
-    // Specular highlight stays put: it's the light, not the ball.
     const spec = ctx.createRadialGradient(x - r * 0.4, y - r * 0.45, 0, x - r * 0.4, y - r * 0.45, r * 0.55);
     spec.addColorStop(0, 'rgba(255,255,255,0.95)');
     spec.addColorStop(0.35, 'rgba(255,255,255,0.35)');
     spec.addColorStop(1, 'rgba(255,255,255,0)');
     ctx.fillStyle = spec;
     ctx.fillRect(x - r, y - r, r * 2, r * 2);
-
     if (dim > 0) {
       ctx.fillStyle = `rgba(0,0,0,${dim})`;
       ctx.fillRect(x - r, y - r, r * 2, r * 2);
@@ -507,109 +609,120 @@ export function mountRollABallController(
     ctx.restore();
   }
 
-  /** Ghosts behind a fast ball. */
-  function drawTrail(now: number, r: number, color: string) {
-    if (!flight) return;
-    const { sim } = flight;
-    const t = now - flight.launchedAt;
-    if (t >= sim.outcome.endedAt) return;
-    const last = sim.frames.length / 2 - 1;
-    const i = clamp(Math.floor(t / PHYSICS.stepMs), 0, last);
-    if (i < 2) return;
-    // Speed in board units per second from the last two frames
-    const vx = (sim.frames[i * 2]! - sim.frames[(i - 1) * 2]!) / (PHYSICS.stepMs / 1000);
-    const vy = (sim.frames[i * 2 + 1]! - sim.frames[(i - 1) * 2 + 1]!) / (PHYSICS.stepMs / 1000);
-    const speed = Math.sqrt(vx * vx + vy * vy);
-    const strength = clamp((speed - 3) / 9, 0, 1);
-    if (strength <= 0) return;
-    for (let k = 1; k <= 3; k++) {
-      const j = i - k * 3;
-      if (j < 0) break;
-      const { x, y } = toCanvas(sim.frames[j * 2]!, sim.frames[j * 2 + 1]!);
-      ctx.beginPath();
-      ctx.arc(x, y, r * (1 - k * 0.12), 0, Math.PI * 2);
-      ctx.fillStyle = hexToRgba(color, strength * (0.28 - k * 0.07));
-      ctx.fill();
-    }
-  }
-
-  /** Draw the ball at a screen position: the WebGL sphere when available, the painted one otherwise. */
-  function paintBall(x: number, y: number, r: number, color: string, alpha: number, dim: number) {
+  /** Draw one ball: the WebGL sphere when available, the painted one otherwise. */
+  function paintBall(id: number, x: number, y: number, r: number, color: string, alpha: number, dim: number) {
     if (ball3d) {
-      const img = ball3d.render(hexToRgb(color), [1, 0.96, 0.86], orientation, dim);
+      const img = ball3d.render(hexToRgb(color), [1, 0.96, 0.86], orientation.get(id) ?? QUAT_IDENTITY, dim);
       const half = r / ball3d.radiusFraction;
       ctx.globalAlpha = alpha;
       ctx.drawImage(img, x - half, y - half, half * 2, half * 2);
       ctx.globalAlpha = 1;
     } else {
-      drawSphere(x, y, r, color, alpha, dim, spin, spinDirX, spinDirY);
+      drawSphere(x, y, r, color, alpha, dim, spin2d.get(id) ?? { spin: 0, dirX: 0, dirY: -1 });
     }
   }
 
-  function drawBall(now: number) {
-    const color = me?.color ?? '#fff';
-    const ready = ballReady(now);
-    const inHand = !flight || now - flight.launchedAt >= flight.sim.outcome.endedAt + RETURN_DELAY_MS;
-    const pose: BallPose = inHand
-      ? { ...restPoint(), scale: 1, alpha: ready ? 1 : 0.45, sinkingInto: null, sink: 0 }
-      : ballAt(now)!;
-
-    // A little hop when it bumps a lip
-    const hopT = (now - lastHopAt) / HOP_MS;
-    const hop = !inHand && hopT >= 0 && hopT < 1 ? Math.sin(hopT * Math.PI) : 0;
-
-    const r = unitAt(pose.y) * PHYSICS.ballRadius * 1.15 * pose.scale * (1 + hop * 0.12);
-    const bx = pose.x;
-    const by = pose.y - hop * r * 0.8;
-
-    // Contact shadow (drifts away as the ball hops)
-    if (!pose.sinkingInto || pose.sink < 0.5) {
+  /** Ghosts behind the rolled ball while it's quick. */
+  function drawTrail(now: number, r: number, color: string) {
+    if (!flight) return;
+    const { sim } = flight;
+    const n = sim.ids.length;
+    const k = sim.launched;
+    const t = now - flight.launchedAt;
+    const last = sim.frames.length / (n * 2) - 1;
+    const i = clamp(Math.floor(t / PHYSICS.stepMs), 0, last);
+    if (i < 2) return;
+    const at = (j: number) => ({ x: sim.frames[(j * n + k) * 2]!, y: sim.frames[(j * n + k) * 2 + 1]! });
+    const a = at(i);
+    const b = at(i - 1);
+    if (Number.isNaN(a.x) || Number.isNaN(b.x)) return;
+    const speed = Math.hypot(a.x - b.x, a.y - b.y) / (PHYSICS.stepMs / 1000);
+    const strength = clamp((speed - 3) / 9, 0, 1);
+    if (strength <= 0) return;
+    for (let g = 1; g <= 3; g++) {
+      const j = i - g * 3;
+      if (j < 0) break;
+      const p = at(j);
+      if (Number.isNaN(p.x)) break;
+      const { x, y } = toCanvas(p.x, p.y);
       ctx.beginPath();
-      ctx.ellipse(bx + r * 0.2, pose.y + r * 0.45, r * (1 + hop * 0.2), r * 0.55, 0, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(0,0,0,${0.35 * pose.alpha * (1 - hop * 0.4)})`;
+      ctx.arc(x, y, r * (1 - g * 0.12), 0, Math.PI * 2);
+      ctx.fillStyle = hexToRgba(color, strength * (0.28 - g * 0.07));
       ctx.fill();
     }
+  }
 
-    if (!inHand) drawTrail(now, r, color);
+  function drawBalls(now: number) {
+    const color = me?.color ?? '#fff';
+    const live = tableLive(now);
+    const grab = canGrab(now);
+    const list = poses(now).sort((a, b) => a.y - b.y);
+    if (flight) {
+      const launchedId = flight.sim.ids[flight.sim.launched]!;
+      const p = list.find((q) => q.id === launchedId);
+      if (p && live) drawTrail(now, ballPx(p.y), color);
+    }
+    for (const pose of list) {
+      const hopT = (now - (lastHopAt.get(pose.id) ?? -Infinity)) / HOP_MS;
+      const hop = hopT >= 0 && hopT < 1 ? Math.sin(hopT * Math.PI) : 0;
+      const lift = pose.lifted ? 1 : hop;
+      const r = ballPx(pose.y) * pose.scale * (1 + hop * 0.12);
+      const bx = pose.x;
+      const by = pose.y - lift * r * 0.8;
+      const dimIdle = !live && !grab && !pose.lifted && !pose.sinkingInto ? 0.35 : 0;
 
-    if (pose.sinkingInto) {
-      // Visible where it's still above the table, or seen down inside the opening.
-      const { rx, ry } = holeSize(pose.sinkingInto.y);
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(0, 0, W, pose.sinkingInto.y);
-      ctx.ellipse(pose.sinkingInto.x, pose.sinkingInto.y, rx, ry, 0, 0, Math.PI * 2);
-      ctx.clip();
-      paintBall(bx, by, r, color, pose.alpha, pose.sink * 0.7);
-      ctx.restore();
-      drawHoleFront(pose.sinkingInto.x, pose.sinkingInto.y, pose.sinkingInto.zone);
-    } else {
-      paintBall(bx, by, r, color, pose.alpha, 0);
+      // Contact shadow: drifts away from a lifted or hopping ball
+      if (!pose.sinkingInto || pose.sink < 0.5) {
+        ctx.beginPath();
+        ctx.ellipse(bx + r * (0.2 + lift * 0.3), pose.y + r * 0.45, r * (1 + lift * 0.25), r * 0.55, 0, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(0,0,0,${(0.35 - lift * 0.15) * pose.alpha})`;
+        ctx.fill();
+      }
+
+      if (pose.sinkingInto) {
+        // Visible where it's still above the table, or seen down inside the opening.
+        const { rx, ry } = holeSize(pose.sinkingInto.y);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, W, pose.sinkingInto.y);
+        ctx.ellipse(pose.sinkingInto.x, pose.sinkingInto.y, rx, ry, 0, 0, Math.PI * 2);
+        ctx.clip();
+        paintBall(pose.id, bx, by, r, color, pose.alpha, pose.sink * 0.7);
+        ctx.restore();
+        drawHoleFront(pose.sinkingInto.x, pose.sinkingInto.y, pose.sinkingInto.zone);
+      } else {
+        paintBall(pose.id, bx, by, r, color, pose.alpha, dimIdle);
+      }
     }
 
-    if (inHand && ready) {
-      const rest = restPoint();
+    if (grab && !drag && list.length) {
+      // Nudge: point at the nearest ball to the middle of the bumper
+      const rest = toCanvas(0, BOARD.ballStartY);
+      const p = list.reduce((a, b) => (Math.abs(a.x - rest.x) < Math.abs(b.x - rest.x) ? a : b));
       ctx.fillStyle = 'rgba(255,255,255,0.7)';
       ctx.font = `600 ${Math.max(12, W * 0.035)}px system-ui, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText('▲ flick', rest.x, rest.y - r - 16 + Math.sin(now / 250) * 3);
+      ctx.fillText('▲ grab & flick', p.x, p.y - ballPx(p.y) - 16 + Math.sin(now / 250) * 3);
     }
   }
 
-  /** Turn simulation events into little on-board labels and haptics as the ball reaches them. */
+  /** Turn simulation events into little on-board labels and haptics as the balls reach them. */
   function announceEvents(now: number) {
     if (!flight) return;
     const t = now - flight.launchedAt;
     const events = flight.sim.events;
     while (flight.nextEvent < events.length && events[flight.nextEvent]!.t <= t) {
       const ev = events[flight.nextEvent++]!;
+      const id = flight.sim.ids[ev.ball]!;
       const label = eventLabel(ev);
       if (label && !(ev.type === 'skip' && flight.skipShown)) labels.push({ ...label, x: ev.x, y: ev.y, at: now });
       if (ev.type === 'skip') flight.skipShown = true;
-      if (ev.type === 'lip' || ev.type === 'skip') buzz(10);
-      if (ev.type === 'lip' || ev.type === 'skip') lastHopAt = now;
-      if (ev.type === 'rail' || ev.type === 'bumper') buzz(6);
+      if (ev.type === 'lip' || ev.type === 'skip') {
+        buzz(10);
+        lastHopAt.set(id, now);
+      }
+      if (ev.type === 'rail' || ev.type === 'bumper' || ev.type === 'ball') buzz(6);
     }
   }
 
@@ -635,24 +748,30 @@ export function mountRollABallController(
     if (!flight) return;
     const t = now - flight.launchedAt;
     const settled = t >= flight.sim.outcome.endedAt;
+    const serverDone = !!state && state.me.flight === null && state.cooldownMs === 0;
+
+    if (flight.isDrop) {
+      if (settled && serverDone) flight = null;
+      return;
+    }
     if (settled && flight.confirmed && flight.popupAt === null) {
       flight.popupAt = now;
       buzz(flight.confirmed.kind === 'hit' ? [30, 40, 30] : 15);
     }
     if (flight.popupAt === null) {
       // Server never confirmed (e.g. it rejected the roll): let the flight expire quietly.
-      if (t > flight.sim.outcome.endedAt + RETURN_DELAY_MS + 2000) flight = null;
+      if (settled && serverDone && t > flight.sim.outcome.endedAt + 1500) flight = null;
       return;
     }
     const u = (now - flight.popupAt) / POPUP_MS;
     if (u > 1) {
-      if (t >= flight.sim.outcome.endedAt + RETURN_DELAY_MS) flight = null;
+      if (serverDone) flight = null;
       return;
     }
     const { kind, points, zone } = flight.confirmed!;
     const text = kind === 'hit' && zone ? `${ZONE_LABEL[zone].toUpperCase()} +${points}` : kind === 'gutter' ? 'GUTTER' : 'ROLLED BACK';
     // Popups live in the ramp area so they never cover the board or legend.
-    const y = (yTo(BOARD.rampLength) + restPoint().y) / 2 - u * 40;
+    const y = (yTo(BOARD.rampLength) + yTo(BOARD.ballStartY)) / 2 - u * 40;
     ctx.globalAlpha = 1 - u * u;
     ctx.fillStyle = kind === 'hit' && zone ? ZONE_COLORS[zone] : 'rgba(255,255,255,0.75)';
     fitFont(ctx, text, 900, Math.max(26, W * 0.12), W * 0.85);
@@ -672,7 +791,7 @@ export function mountRollABallController(
     if (state.phase === 'countdown') {
       const secs = Math.ceil(state.countdownMs / 1000);
       big = secs > 0 ? String(secs) : 'GO!';
-      small = 'Flick up when the race starts';
+      small = 'Grab a ball and flick it when the race starts';
     } else if (state.phase === 'finished') {
       const winner = state.winnerId ? players.get(state.winnerId) : null;
       const iWon = state.winnerId === me?.id;
@@ -708,11 +827,11 @@ export function mountRollABallController(
       if (flight && !flight.confirmed && next.me.rolls > flight.rollsBefore && next.me.lastRoll) {
         flight.confirmed = { points: next.me.lastRoll.points, kind: next.me.lastRoll.kind, zone: next.me.lastRoll.zone };
       }
-      // Ball in play on the server but not here (reconnect / reload mid-roll): pick it up in progress.
-      if (!flight && next.me.ball) {
-        const elapsed = next.raceMs - next.me.ball.launchedAt;
-        const sim = simulateRoll(next.me.ball.vx, next.me.ball.vy);
-        if (elapsed < sim.outcome.endedAt + RETURN_DELAY_MS) startFlight(sim, performance.now() - elapsed, next.me.rolls);
+      // A roll in progress on the server but not here (reconnect / reload mid-roll): pick it up in progress.
+      if (!flight && next.me.flight) {
+        const elapsed = next.raceMs - next.me.flight.launchedAt;
+        const sim = simulateRoll(next.me.flight.launch, next.me.flight.atRest);
+        if (elapsed < sim.outcome.endedAt) startFlight(sim, performance.now() - elapsed, next.me.rolls);
       }
 
       rankEl.textContent = next.phase === 'countdown' ? 'Ready?' : `${ordinal(next.me.rank)} of ${next.playerCount}`;
@@ -726,7 +845,7 @@ export function mountRollABallController(
             ? "You're leading — keep rolling!"
             : `${next.leaderProgress - next.me.progress} behind the leader`
           : next.phase === 'countdown'
-            ? 'Too soft rolls back. Too hard skips the lip. Angle it off the rails.'
+            ? 'Grab a ball, drag it up the ramp and flick. Balls stay where they land.'
             : 'Race over!';
       el.classList.toggle('rab-ctl-finished', next.phase === 'finished');
     },
@@ -755,29 +874,25 @@ function eventLabel(ev: RollEvent): { text: string; color: string } | null {
  */
 export function readFlick(samples: Sample[], canvasHeight: number): { power: number; dirX: number; dirY: number } | null {
   if (samples.length < 2 || canvasHeight <= 0) return null;
-  const first = samples[0]!;
   const last = samples[samples.length - 1]!;
-  const totalDy = first.y - last.y; // up is positive
-  if (totalDy < MIN_FLICK_PX) return null;
-
   // Velocity from the final window of the gesture, so a slow wind-up
   // followed by a snap still counts as a snap.
-  let ref = first;
+  let ref = samples[0]!;
   for (const s of samples) {
     if (last.t - s.t <= VELOCITY_WINDOW_MS) {
       ref = s;
       break;
     }
   }
+  const dx = last.x - ref.x;
+  const dy = ref.y - last.y; // up is positive
+  if (dy < MIN_FLICK_PX * 0.5) return null;
   const dt = Math.max(16, last.t - ref.t);
-  const dy = Math.max(0, ref.y - last.y);
   const speed = dy / canvasHeight / (dt / 1000); // canvas heights per second
-  // Half from how hard you snap, half from how far you pull: a long swipe is a hard roll.
-  const power = clamp(0.5 * (speed / POWER_SCALE) + 0.5 * (totalDy / canvasHeight / DISTANCE_SCALE), 0, 1);
-
-  const dx = last.x - first.x;
-  const len = Math.sqrt(dx * dx + totalDy * totalDy);
-  return { power, dirX: dx / len, dirY: totalDy / len };
+  // Half from how hard you snap, half from how far the final flick travelled.
+  const power = clamp(0.5 * (speed / POWER_SCALE) + 0.5 * (dy / canvasHeight / (DISTANCE_SCALE * 0.5)), 0, 1);
+  const len = Math.sqrt(dx * dx + dy * dy);
+  return { power, dirX: dx / len, dirY: dy / len };
 }
 
 /** Sets ctx.font at the largest size (≤ max) where `text` fits in `maxWidth`; returns the size. */

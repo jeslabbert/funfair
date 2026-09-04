@@ -1,14 +1,20 @@
 import type { GameContext, GameInstance, GameResults, GameServerDefinition } from '@funfair/shared';
 import { rollABallMeta } from './meta';
 import {
+  BALL_START_XS,
+  BOARD,
+  CHUTE_DELAY_MS,
+  CHUTE_SLOTS,
   COUNTDOWN_MS,
   FINISH_LINGER_MS,
-  RETURN_DELAY_MS,
+  PHYSICS,
   TRACK_LENGTH,
+  clampLaunch,
+  clampLaunchPosition,
   isRollInput,
   ordinal,
   simulateRoll,
-  clampLaunch,
+  type BallView,
   type FeedEntry,
   type RacePhase,
   type RacerState,
@@ -16,14 +22,10 @@ import {
   type RollABallInput,
   type RollABallPlayerState,
   type RollOutcome,
+  type RollSimulation,
 } from './logic';
 
 const FEED_LENGTH = 8;
-
-interface PendingBall {
-  outcome: RollOutcome;
-  applied: boolean;
-}
 
 export class RollABallGame implements GameInstance<RollABallHostState, RollABallPlayerState, RollABallInput> {
   private phase: RacePhase = 'countdown';
@@ -33,12 +35,25 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
   private done = false;
   private winnerId: string | null = null;
   private readonly racers = new Map<string, RacerState>();
-  private readonly pending = new Map<string, PendingBall>();
+  /** The simulation behind each racer's current flight. */
+  private readonly pending = new Map<string, RollSimulation>();
+  /** When each ball in the chute comes back, per racer. */
+  private readonly returns = new Map<string, Map<number, number>>();
   private readonly feed: FeedEntry[] = [];
 
   constructor(ctx: GameContext) {
     for (const p of ctx.players) {
-      this.racers.set(p.id, { playerId: p.id, progress: 0, rolls: 0, lastRoll: null, ball: null, finishedAt: null, rank: 1 });
+      this.racers.set(p.id, {
+        playerId: p.id,
+        progress: 0,
+        rolls: 0,
+        lastRoll: null,
+        balls: BALL_START_XS.map((x, id) => ({ id, x, y: BOARD.ballStartY, status: 'resting' })),
+        flight: null,
+        finishedAt: null,
+        rank: 1,
+      });
+      this.returns.set(p.id, new Map());
     }
     this.updateRanks();
   }
@@ -48,13 +63,18 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
     if (!isRollInput(input)) return;
     const racer = this.racers.get(playerId);
     if (!racer || racer.finishedAt !== null) return;
-    if (racer.ball) return; // one ball at a time – it has to drop in or come back first
+    if (racer.flight) return; // one roll at a time – the table has to settle first
+    const ball = racer.balls.find((b) => b.id === input.ball && b.status === 'resting');
+    if (!ball) return;
 
-    const launch = clampLaunch(input.vx, input.vy);
-    if (launch.vy <= 0) return;
-    const sim = simulateRoll(launch.vx, launch.vy);
-    racer.ball = { vx: launch.vx, vy: launch.vy, launchedAt: this.raceMs };
-    this.pending.set(playerId, { outcome: sim.outcome, applied: false });
+    const pos = clampLaunchPosition(input.x, input.y);
+    const vel = clampLaunch(input.vx, input.vy);
+    const launch = { ball: ball.id, x: pos.x, y: pos.y, vx: vel.vx, vy: vel.vy };
+    const atRest = racer.balls.filter((b) => b.status === 'resting').map(({ id, x, y }) => ({ id, x, y }));
+    const sim = simulateRoll(launch, atRest);
+    racer.flight = { launch, atRest, launchedAt: this.raceMs };
+    ball.status = 'rolling';
+    this.pending.set(playerId, sim);
   }
 
   tick(dtMs: number): void {
@@ -68,36 +88,71 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
         break;
       case 'racing':
         this.raceMs += dtMs;
-        this.settleBalls();
+        this.settle();
         break;
       case 'finished':
         this.raceMs += dtMs;
-        this.settleBalls();
+        this.settle();
         this.lingerMs -= dtMs;
         if (this.lingerMs <= 0) this.done = true;
         break;
     }
   }
 
-  /** Apply outcomes whose ball has just dropped in / come back, and hand out fresh balls. */
-  private settleBalls(): void {
+  /** Land rolls whose balls have all settled, then bring balls back from the chute. */
+  private settle(): void {
     let changed = false;
     for (const racer of this.racers.values()) {
-      const ball = racer.ball;
-      const pending = this.pending.get(racer.playerId);
-      if (!ball || !pending) continue;
-      const endsAt = ball.launchedAt + pending.outcome.endedAt;
-      if (!pending.applied && this.raceMs >= endsAt) {
-        pending.applied = true;
-        this.applyOutcome(racer, pending.outcome);
-        changed = true;
-      }
-      if (this.raceMs >= endsAt + RETURN_DELAY_MS) {
-        racer.ball = null;
+      const flight = racer.flight;
+      const sim = this.pending.get(racer.playerId);
+      const returns = this.returns.get(racer.playerId)!;
+
+      if (flight && sim && this.raceMs >= flight.launchedAt + sim.outcome.endedAt) {
+        const survivors = new Map(sim.final.map((b) => [b.id, b]));
+        for (const ball of racer.balls) {
+          if (ball.status === 'returning') continue;
+          const rest = survivors.get(ball.id);
+          if (rest) {
+            ball.x = rest.x;
+            ball.y = rest.y;
+            ball.status = 'resting';
+          } else {
+            ball.status = 'returning';
+            returns.set(ball.id, this.raceMs + CHUTE_DELAY_MS);
+          }
+        }
+        // Letting go of a ball on the ramp without rolling it isn't a roll.
+        const wasDrop = sim.outcome.kind === 'back' && sim.outcome.peakY < BOARD.rampLength && sim.captures.length === 0;
+        if (!wasDrop) {
+          this.applyOutcome(racer, sim.outcome);
+          changed = true;
+        }
+        racer.flight = null;
         this.pending.delete(racer.playerId);
+      }
+
+      if (!racer.flight) {
+        for (const ball of racer.balls) {
+          const at = returns.get(ball.id);
+          if (ball.status !== 'returning' || at === undefined || this.raceMs < at) continue;
+          const x = this.freeSlot(racer.balls);
+          ball.x = x;
+          ball.y = BOARD.ballStartY;
+          ball.status = 'resting';
+          returns.delete(ball.id);
+        }
       }
     }
     if (changed) this.updateRanks();
+  }
+
+  /** First chute slot along the bumper that isn't blocked by a resting ball. */
+  private freeSlot(balls: BallView[]): number {
+    const gap = PHYSICS.ballRadius * 2 + 0.05;
+    for (const x of CHUTE_SLOTS) {
+      if (balls.every((b) => b.status !== 'resting' || Math.abs(b.x - x) >= gap)) return x;
+    }
+    return 0;
   }
 
   private applyOutcome(racer: RacerState, outcome: RollOutcome): void {
@@ -129,9 +184,18 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
   }
 
   playerState(playerId: string): RollABallPlayerState {
-    const me = this.racers.get(playerId) ?? { playerId, progress: 0, rolls: 0, lastRoll: null, ball: null, finishedAt: null, rank: 0 };
-    const pending = this.pending.get(playerId);
-    const cooldownMs = me.ball && pending ? Math.max(0, me.ball.launchedAt + pending.outcome.endedAt + RETURN_DELAY_MS - this.raceMs) : 0;
+    const me = this.racers.get(playerId) ?? {
+      playerId,
+      progress: 0,
+      rolls: 0,
+      lastRoll: null,
+      balls: [],
+      flight: null,
+      finishedAt: null,
+      rank: 0,
+    };
+    const sim = this.pending.get(playerId);
+    const cooldownMs = me.flight && sim ? Math.max(0, me.flight.launchedAt + sim.outcome.endedAt - this.raceMs) : 0;
     let leaderProgress = 0;
     for (const r of this.racers.values()) leaderProgress = Math.max(leaderProgress, r.progress);
     return {

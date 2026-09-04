@@ -118,8 +118,13 @@ can be unit-tested with `node:test` (`pnpm test`).
   In between, it drops in. A ball that skips on the way up can still be caught by a hole on
   the way back down, or roll all the way back to your hand for nothing. Off the top edge is
   the back gutter.
-- There is no fixed cooldown: your next ball is ready when the current one drops in or
-  comes home, so a timid roll costs time rather than points.
+- Each player has **three balls** on the table. Grab the one nearest your finger, drag it
+  anywhere on the ramp and flick it from there – the closer to the lip you let go, the less
+  power you need. A ball that comes back bounces off the front bumper and **stays where it
+  settles**; letting go without a flick just drops it (it rolls back down and doesn't count
+  as a roll). Balls that drop into a hole come back through the chute a moment later. One
+  roll at a time: the whole table is simulated together, so a returning ball can knock the
+  resting ones aside.
 - The simulation is deterministic (fixed timestep, no trig, no randomness), so the phone
   runs the same `simulateRoll` the server does to animate the ball and show lip/skip
   moments as they happen, while the server stays authoritative for the score. Reloading
