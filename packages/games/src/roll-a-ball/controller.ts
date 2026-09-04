@@ -105,6 +105,11 @@ export function mountRollABallController(
   let flight: Flight | null = null;
   let labels: FloatingLabel[] = [];
   let lastHopAt = -Infinity;
+  /** Rolling state: accumulated spin (radians) and the last direction of travel on screen. */
+  let spin = 0;
+  let spinDirX = 0;
+  let spinDirY = -1;
+  let prevBoard: { x: number; y: number } | null = null;
   let samples: Sample[] = [];
   let dragging = false;
   let raf = 0;
@@ -181,6 +186,33 @@ export function mountRollABallController(
   function startFlight(sim: RollSimulation, launchedAt: number, rollsBefore: number) {
     flight = { sim, launchedAt, rollsBefore, confirmed: null, popupAt: null, nextEvent: 0, skipShown: false };
     labels = [];
+    prevBoard = null;
+  }
+
+  /** Advance the ball's spin by how far it has rolled since the last frame. */
+  function updateSpin(now: number) {
+    if (!flight) {
+      prevBoard = null;
+      return;
+    }
+    const { sim } = flight;
+    const t = now - flight.launchedAt;
+    const last = sim.frames.length / 2 - 1;
+    const i = clamp(Math.floor(t / PHYSICS.stepMs), 0, last);
+    const cur = { x: sim.frames[i * 2]!, y: sim.frames[i * 2 + 1]! };
+    if (prevBoard) {
+      const dx = cur.x - prevBoard.x;
+      const dy = cur.y - prevBoard.y;
+      const ds = Math.sqrt(dx * dx + dy * dy);
+      if (ds > 1e-4) {
+        spin += ds / PHYSICS.ballRadius;
+        // Screen direction: board +y is up the screen.
+        const len = Math.sqrt(dx * dx + dy * dy);
+        spinDirX = dx / len;
+        spinDirY = -dy / len;
+      }
+    }
+    prevBoard = cur;
   }
 
   // ---- drawing ------------------------------------------------------------
@@ -191,6 +223,7 @@ export function mountRollABallController(
     drawBoard();
     drawHoles();
     announceEvents(now);
+    updateSpin(now);
     drawBall(now);
     drawLabels(now);
     drawPopup(now);
@@ -408,22 +441,86 @@ export function mountRollABallController(
     return { x, y, scale: 1, alpha: 1, sinkingInto: null, sink: 0 };
   }
 
-  function drawSphere(x: number, y: number, r: number, color: string, alpha: number, dim: number) {
+  /**
+   * A carnival ball: player colour with cream spots on two rings around the
+   * rolling axis, so the spots sweep across the face as it rolls. `angle` is
+   * the spin, `dirX/dirY` the on-screen direction of travel.
+   */
+  function drawSphere(x: number, y: number, r: number, color: string, alpha: number, dim: number, angle: number, dirX: number, dirY: number) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
-    const g = ctx.createRadialGradient(x - r * 0.38, y - r * 0.42, r * 0.08, x, y, r);
-    g.addColorStop(0, '#ffffff');
-    g.addColorStop(0.22, color);
-    g.addColorStop(0.85, shade(color, -0.5));
-    g.addColorStop(1, shade(color, -0.7));
-    ctx.fillStyle = g;
-    ctx.globalAlpha = alpha;
-    ctx.fill();
+    ctx.clip();
+
+    // Base shading: lit top-left, dark rim
+    const base = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.15, x, y, r);
+    base.addColorStop(0, shade(color, 0.25));
+    base.addColorStop(0.6, color);
+    base.addColorStop(1, shade(color, -0.65));
+    ctx.fillStyle = base;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+
+    // Spots: `a` is the rolling axis on screen (perpendicular to travel).
+    const ax = -dirY;
+    const ay = dirX;
+    const spotR = r * 0.2;
+    for (const ring of [-0.5, 0.5]) {
+      const ringR = Math.sqrt(1 - ring * ring); // radius of the small circle at this latitude
+      for (let k = 0; k < 4; k++) {
+        const th = angle + (k * Math.PI) / 2 + (ring > 0 ? Math.PI / 4 : 0);
+        const depth = Math.cos(th); // >0 faces the viewer
+        if (depth <= 0.05) continue;
+        const along = Math.sin(th) * ringR; // offset along the direction of travel
+        const sx = x + (ax * ring + dirX * along) * r;
+        const sy = y + (ay * ring + dirY * along) * r;
+        ctx.beginPath();
+        // Foreshortened along the travel direction as the spot turns away.
+        ctx.ellipse(sx, sy, spotR * Math.max(0.15, depth), spotR, Math.atan2(dirY, dirX), 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 244, 220, ${0.35 + 0.55 * depth})`;
+        ctx.fill();
+      }
+    }
+
+    // Specular highlight stays put: it's the light, not the ball.
+    const spec = ctx.createRadialGradient(x - r * 0.4, y - r * 0.45, 0, x - r * 0.4, y - r * 0.45, r * 0.55);
+    spec.addColorStop(0, 'rgba(255,255,255,0.95)');
+    spec.addColorStop(0.35, 'rgba(255,255,255,0.35)');
+    spec.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = spec;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+
     if (dim > 0) {
       ctx.fillStyle = `rgba(0,0,0,${dim})`;
+      ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    ctx.restore();
+  }
+
+  /** Ghosts behind a fast ball. */
+  function drawTrail(now: number, r: number, color: string) {
+    if (!flight) return;
+    const { sim } = flight;
+    const t = now - flight.launchedAt;
+    if (t >= sim.outcome.endedAt) return;
+    const last = sim.frames.length / 2 - 1;
+    const i = clamp(Math.floor(t / PHYSICS.stepMs), 0, last);
+    if (i < 2) return;
+    // Speed in board units per second from the last two frames
+    const vx = (sim.frames[i * 2]! - sim.frames[(i - 1) * 2]!) / (PHYSICS.stepMs / 1000);
+    const vy = (sim.frames[i * 2 + 1]! - sim.frames[(i - 1) * 2 + 1]!) / (PHYSICS.stepMs / 1000);
+    const speed = Math.sqrt(vx * vx + vy * vy);
+    const strength = clamp((speed - 3) / 9, 0, 1);
+    if (strength <= 0) return;
+    for (let k = 1; k <= 3; k++) {
+      const j = i - k * 3;
+      if (j < 0) break;
+      const { x, y } = toCanvas(sim.frames[j * 2]!, sim.frames[j * 2 + 1]!);
+      ctx.beginPath();
+      ctx.arc(x, y, r * (1 - k * 0.12), 0, Math.PI * 2);
+      ctx.fillStyle = hexToRgba(color, strength * (0.28 - k * 0.07));
       ctx.fill();
     }
-    ctx.globalAlpha = 1;
   }
 
   function drawBall(now: number) {
@@ -450,6 +547,8 @@ export function mountRollABallController(
       ctx.fill();
     }
 
+    if (!inHand) drawTrail(now, r, color);
+
     if (pose.sinkingInto) {
       // Visible where it's still above the table, or seen down inside the opening.
       const { rx, ry } = holeSize(pose.sinkingInto.y);
@@ -458,11 +557,11 @@ export function mountRollABallController(
       ctx.rect(0, 0, W, pose.sinkingInto.y);
       ctx.ellipse(pose.sinkingInto.x, pose.sinkingInto.y, rx, ry, 0, 0, Math.PI * 2);
       ctx.clip();
-      drawSphere(bx, by, r, color, pose.alpha, pose.sink * 0.7);
+      drawSphere(bx, by, r, color, pose.alpha, pose.sink * 0.7, spin, spinDirX, spinDirY);
       ctx.restore();
       drawHoleFront(pose.sinkingInto.x, pose.sinkingInto.y, pose.sinkingInto.zone);
     } else {
-      drawSphere(bx, by, r, color, pose.alpha, 0);
+      drawSphere(bx, by, r, color, pose.alpha, 0, spin, spinDirX, spinDirY);
     }
 
     if (inHand && ready) {
@@ -676,6 +775,12 @@ function buzz(pattern: number | number[]) {
   } catch {
     /* not supported */
   }
+}
+
+function hexToRgba(hex: string, a: number): string {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return `rgba(255,255,255,${a})`;
+  return `rgba(${parseInt(m[1]!, 16)},${parseInt(m[2]!, 16)},${parseInt(m[3]!, 16)},${a})`;
 }
 
 function shade(hex: string, amount: number): string {
