@@ -82,7 +82,7 @@ void main() {
   float diff = max(dot(N, L), 0.0);
   float spec = pow(max(dot(N, H), 0.0), 56.0);
   float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
-  vec3 c = base * (0.42 + 0.8 * diff) + vec3(1.0) * spec * 0.9 + base * rim * 0.35;
+  vec3 c = base * (0.34 + 0.76 * diff) + vec3(1.0) * spec * 0.85 + base * rim * 0.3;
   c *= (1.0 - uDim);
   gl_FragColor = vec4(c, 1.0);
 }`;
@@ -139,7 +139,8 @@ export function createBallRenderer(size = 160): BallRenderer | null {
     for (let s = 0; s < segs; s++) {
       const a = r * (segs + 1) + s;
       const b = a + segs + 1;
-      idx.push(a, b, a + 1, b, b + 1, a + 1);
+      // Counter-clockwise seen from outside, so back-face culling keeps the near hemisphere.
+      idx.push(a, a + 1, b, b, a + 1, b + 1);
     }
   }
   const vbo = gl.createBuffer();
