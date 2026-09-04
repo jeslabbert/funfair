@@ -140,8 +140,9 @@ export function mountRollABallController(
   /** The predicted table: stepped locally, checked against server snapshots. */
   let table: TableState | null = null;
   const localHistory: (TableState | undefined)[] = new Array(LOCAL_HISTORY);
-  /** Race clock estimate: raceMs ≈ performance.now() + raceOffset. */
+  /** Race clock estimate: raceMs ≈ performance.now() + raceOffset, from the freshest of recent snapshots. */
   let raceOffset = -Infinity;
+  let clockSamples: number[] = [];
   let pending: { input: RollABallInput; sentAt: number }[] = [];
   let drag: Drag | null = null;
   let labels: FloatingLabel[] = [];
@@ -859,6 +860,8 @@ export function mountRollABallController(
 
   resize();
   raf = requestAnimationFrame(frame);
+  // Debug hook: the predicted table, for tooling and tests.
+  (window as unknown as { __rabTable?: () => TableState | null }).__rabTable = () => table;
 
   return {
     update(next, meInfo, playerList) {
@@ -866,9 +869,15 @@ export function mountRollABallController(
       me = meInfo;
       players = new Map(playerList.map((p) => [p.id, p]));
 
-      // Race clock: the earliest-arriving snapshots give the best estimate.
-      const sample = next.raceMs - performance.now();
-      raceOffset = raceOffset === -Infinity ? sample : Math.max(sample, raceOffset - 2);
+      // Race clock: only while it's running, and the earliest-arriving of recent snapshots is the best estimate.
+      if (next.phase === 'racing' || next.phase === 'finished') {
+        clockSamples.push(next.raceMs - performance.now());
+        if (clockSamples.length > 20) clockSamples.shift();
+        raceOffset = Math.max(...clockSamples);
+      } else {
+        clockSamples = [];
+        raceOffset = -Infinity;
+      }
       reconcile(next.table);
 
       rankEl.textContent = next.phase === 'countdown' ? 'Ready?' : `${ordinal(next.me.rank)} of ${next.playerCount}`;

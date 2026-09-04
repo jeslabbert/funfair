@@ -267,6 +267,24 @@ test('a late input is applied at the tick it happened', () => {
   assert.ok(MAX_REWIND_TICKS >= 12);
 });
 
+test('an input stamped a little ahead waits for its tick', () => {
+  const { game, advance } = makeGame(['a']);
+  advance(COUNTDOWN_MS + 500);
+  const now = game.playerState('a').table.tick;
+  const ahead = now + 6;
+  game.onInput('a', { type: 'roll', ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.55), tick: ahead });
+  assert.equal(game.playerState('a').table.balls[1]!.status, 'resting', 'not applied yet');
+  advance(200);
+  const after = game.playerState('a').table;
+  assert.equal(after.balls[1]!.status, 'rolling');
+  const ref = createTable();
+  ref.tick = ahead;
+  launchBall(ref, { ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.55) });
+  const ev: TableEvent[] = [];
+  while (ref.tick < after.tick) stepTable(ref, ev);
+  assert.ok(tablesMatch(after, ref, 0), 'applied exactly at its tick');
+});
+
 test('a drop moves the ball but is not a roll', () => {
   const { game, advance } = makeGame(['a']);
   advance(COUNTDOWN_MS);

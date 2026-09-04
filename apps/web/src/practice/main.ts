@@ -63,6 +63,8 @@ function run(gameId: string) {
   history.replaceState(null, '', `/practice/?game=${gameId}`);
 
   const instance: GameInstance = server.create({ players: [me], random: Math.random, now: () => performance.now() });
+  // Debug hook for tooling: the authoritative instance.
+  (window as unknown as { __practiceGame?: GameInstance }).__practiceGame = instance;
   const gameRoot = h('div', { class: 'game-root' });
   const bar = h(
     'div',
