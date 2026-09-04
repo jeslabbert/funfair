@@ -394,6 +394,20 @@ input {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.practice-mode {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.practice-mode-on {
+  background: rgba(255, 231, 76, 0.18);
+  border-color: rgba(255, 231, 76, 0.5);
+  color: #ffe74c;
+}
 .btn-small {
   padding: 8px 14px;
   font-size: 0.95rem;

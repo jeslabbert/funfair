@@ -208,7 +208,7 @@ export interface Obstacles {
   closed: number[];
 }
 
-const NONE: Obstacles = { wave: null, tangible: false, pegs: [], windmill: null, closed: [] };
+export const NO_OBSTACLES: Obstacles = { wave: null, tangible: false, pegs: [], windmill: null, closed: [] };
 
 function pegPositions(kind: WaveKind, t: number): { id: string; x: number; y: number; r: number }[] {
   switch (kind) {
@@ -236,7 +236,7 @@ function pegPositions(kind: WaveKind, t: number): { id: string; x: number; y: nu
 
 export function obstaclesAt(tick: number, seed: number): Obstacles {
   const wave = waveAt(tick, seed);
-  if (!wave) return NONE;
+  if (!wave) return NO_OBSTACLES;
   const tangible = wave.alpha >= 1;
   const now = pegPositions(wave.kind, wave.t);
   const before = pegPositions(wave.kind, wave.t - 1);
@@ -296,6 +296,8 @@ export interface TableState {
   tick: number;
   /** Per-race seed that picks the obstacle order. */
   seed: number;
+  /** Whether obstacle waves are on for this race. */
+  obstacles: boolean;
   balls: BallState[];
 }
 
@@ -355,12 +357,17 @@ function newBall(id: number, x: number, y: number): BallState {
   return { id, x, y, vx: 0, vy: 0, status: 'resting', frozen: true, onBumper: true, inside: [], grace: [], returnsAt: -1, launchTick: -1, crossedLip: false };
 }
 
-export function createTable(seed = 0): TableState {
-  return { tick: 0, seed: seed >>> 0, balls: BALL_START_XS.map((x, id) => newBall(id, x, BOARD.ballStartY)) };
+export function createTable(seed = 0, obstacles = false): TableState {
+  return { tick: 0, seed: seed >>> 0, obstacles, balls: BALL_START_XS.map((x, id) => newBall(id, x, BOARD.ballStartY)) };
 }
 
 export function cloneTable(t: TableState): TableState {
-  return { tick: t.tick, seed: t.seed, balls: t.balls.map((b) => ({ ...b, inside: [...b.inside], grace: [...b.grace] })) };
+  return { tick: t.tick, seed: t.seed, obstacles: t.obstacles, balls: t.balls.map((b) => ({ ...b, inside: [...b.inside], grace: [...b.grace] })) };
+}
+
+/** The obstacles on a table at its current tick (none if the race has them off). */
+export function tableObstacles(t: TableState): Obstacles {
+  return t.obstacles ? obstaclesAt(t.tick, t.seed) : NO_OBSTACLES;
 }
 
 /** Two tables are the same if every ball matches to floating-point noise. */
@@ -446,7 +453,7 @@ export function stepTable(t: TableState, events: TableEvent[]): void {
   const tick = t.tick;
   const balls = t.balls;
   const onTable = (b: BallState) => b.status === 'resting' || b.status === 'rolling';
-  const obstacles = obstaclesAt(tick, t.seed);
+  const obstacles = tableObstacles(t);
 
   // Integrate the moving bodies
   for (const b of balls) {
@@ -712,6 +719,8 @@ export interface RollABallHostState {
   racers: RacerState[];
   feed: FeedEntry[];
   winnerId: string | null;
+  /** Whether this race has obstacle waves. */
+  obstacles: boolean;
   /** The obstacle wave on the tables right now. */
   wave: { kind: WaveKind; name: string; t: number; alpha: number } | null;
 }
