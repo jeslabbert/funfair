@@ -1,18 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  AIM_UNITS,
+  BOARD,
   COUNTDOWN_MS,
   FINISH_LINGER_MS,
   HOLES,
-  MAX_POWER,
-  MIN_POWER,
-  ROLL_COOLDOWN_MS,
+  PHYSICS,
+  RETURN_DELAY_MS,
   ROWS,
   TRACK_LENGTH,
+  clampLaunch,
   ordinal,
-  resolveRoll,
-  type RollResult,
+  simulateRoll,
 } from './logic';
 import { RollABallGame } from './server';
 import type { PlayerInfo } from '@funfair/shared';
@@ -25,39 +24,25 @@ function makeGame(ids: string[]) {
   let clock = 0;
   const game = new RollABallGame({ players: ids.map(player), random: () => 0.5, now: () => clock });
   const advance = (ms: number) => {
-    clock += ms;
-    game.tick(ms);
+    // Tick in 50 ms slices like the room does.
+    while (ms > 0) {
+      const step = Math.min(50, ms);
+      clock += step;
+      game.tick(step);
+      ms -= step;
+    }
   };
   return { game, advance };
 }
 
-test('resolveRoll: depth picks the row, aim picks the hole, zones follow the pyramid', () => {
-  assert.equal(resolveRoll(0.1, 0).kind, 'short');
-  assert.equal(resolveRoll(0.99, 0).kind, 'gutter');
-  assert.equal(resolveRoll(5, 0).kind, 'gutter');
-  assert.equal(resolveRoll(-1, 0).kind, 'short');
+/** Launch velocity for a power (0..1) and a lateral fraction of the speed. */
+function launch(power: number, lateral = 0) {
+  const v = power * PHYSICS.maxLaunchSpeed;
+  const vx = v * lateral;
+  return { vx, vy: Math.sqrt(v * v - vx * vx) };
+}
 
-  // Front row, centre: walk.
-  assert.deepEqual(pick(resolveRoll(0.2, 0)), { kind: 'hit', zone: 'walk', points: 1, row: 0, col: 3 });
-  // Front row, hard to the side: the arrow's arm – trot.
-  assert.deepEqual(pick(resolveRoll(0.2, 0.85)), { kind: 'hit', zone: 'trot', points: 2, row: 0, col: 6 });
-  // Even further out misses the board.
-  assert.equal(resolveRoll(0.2, 1).kind, 'wide');
-  // Middle row is the arrow tip: trot all the way across.
-  assert.deepEqual(pick(resolveRoll(0.5, 0)), { kind: 'hit', zone: 'trot', points: 2, row: 3, col: 2 });
-  assert.equal(resolveRoll(0.5, -0.4).zone, 'trot');
-  // Back rows are the gallop triangle; the apex needs a straight roll.
-  assert.deepEqual(pick(resolveRoll(0.7, 0)), { kind: 'hit', zone: 'gallop', points: 3, row: 4, col: 1 });
-  assert.deepEqual(pick(resolveRoll(0.93, 0.1)), { kind: 'hit', zone: 'gallop', points: 3, row: 6, col: 0 });
-  assert.equal(resolveRoll(0.93, 0.2).kind, 'wide');
-
-  // Every hole on the board is reachable and scores.
-  for (const h of HOLES) {
-    const power = MIN_POWER + (h.row / (ROWS - 1)) * (MAX_POWER - MIN_POWER);
-    const r = resolveRoll(power, h.x / AIM_UNITS);
-    assert.deepEqual(pick(r), { kind: 'hit', zone: h.zone, points: h.points, row: h.row, col: h.col });
-  }
-});
+const types = (events: { type: string }[]) => events.map((e) => e.type);
 
 test('the pyramid has the right shape', () => {
   assert.equal(HOLES.length, (ROWS * (ROWS + 1)) / 2);
@@ -65,44 +50,106 @@ test('the pyramid has the right shape', () => {
   assert.equal(count('gallop'), 6);
   assert.equal(count('trot'), 10);
   assert.equal(count('walk'), 12);
+  assert.ok(HOLES.every((h) => h.y > BOARD.rampLength && h.y < BOARD.gutterY));
 });
 
-function pick(r: RollResult) {
-  return { kind: r.kind, zone: r.zone, points: r.points, row: r.row, col: r.col };
-}
+test('clampLaunch limits speed and angle', () => {
+  const fast = clampLaunch(0, 100);
+  assert.ok(Math.abs(fast.vy - PHYSICS.maxLaunchSpeed) < 1e-9);
+  const sideways = clampLaunch(10, 1);
+  assert.ok(Math.abs(sideways.vx) <= PHYSICS.maxLateralRatio * Math.hypot(sideways.vx, sideways.vy) + 1e-9);
+  assert.equal(clampLaunch(0, -5).vy, 0);
+});
+
+test('simulateRoll is deterministic', () => {
+  const { vx, vy } = launch(0.7, 0.2);
+  const a = simulateRoll(vx, vy);
+  const b = simulateRoll(vx, vy);
+  assert.deepEqual(a.outcome, b.outcome);
+  assert.deepEqual(a.frames, b.frames);
+  assert.deepEqual(a.events, b.events);
+});
+
+test('a gentle roll comes back down the ramp', () => {
+  const { vx, vy } = launch(0.3);
+  const sim = simulateRoll(vx, vy);
+  assert.equal(sim.outcome.kind, 'back');
+  assert.equal(sim.outcome.points, 0);
+  const lastY = sim.frames[sim.frames.length - 1]!;
+  assert.ok(lastY <= BOARD.ballStartY + 0.05);
+  // The ball went up before it came back.
+  assert.ok(Math.max(...sim.frames.filter((_, i) => i % 2 === 1)) > 1);
+});
+
+test('the right speed drops into the front row; the lip rejects a crawl; too fast skips', () => {
+  const walk = simulateRoll(launch(0.5).vx, launch(0.5).vy);
+  assert.equal(walk.outcome.kind, 'hit');
+  assert.equal(walk.outcome.zone, 'walk');
+  assert.equal(walk.outcome.row, 0);
+  assert.equal(walk.outcome.col, 3);
+
+  const crawl = simulateRoll(launch(0.5, 0.15).vx, launch(0.5, 0.15).vy);
+  assert.ok(types(crawl.events).includes('lip'), 'ball should bounce off a lip');
+  assert.equal(crawl.outcome.kind, 'back');
+
+  const quick = simulateRoll(launch(0.55).vx, launch(0.55).vy);
+  assert.ok(types(quick.events).includes('skip'), 'ball should skip the first hole');
+  assert.equal(quick.outcome.kind, 'hit');
+});
+
+test('a hard straight roll reaches the gallop triangle; a wide one bounces off the rail', () => {
+  const gallop = simulateRoll(launch(0.9).vx, launch(0.9).vy);
+  assert.equal(gallop.outcome.zone, 'gallop');
+  assert.equal(gallop.outcome.points, 3);
+
+  const bank = simulateRoll(launch(0.75, 0.4).vx, launch(0.75, 0.4).vy);
+  assert.ok(types(bank.events).includes('rail'));
+  assert.ok(bank.frames.filter((_, i) => i % 2 === 0).every((x) => Math.abs(x) <= BOARD.halfWidth - PHYSICS.ballRadius + 1e-6));
+});
 
 test('ordinal', () => {
   assert.deepEqual([1, 2, 3, 4, 11, 12, 13, 21, 22].map(ordinal), ['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd']);
 });
 
-test('rolls are ignored during countdown and rate limited while racing', () => {
+test('one ball at a time; points land when the ball does', () => {
   const { game, advance } = makeGame(['a', 'b']);
-  game.onInput('a', { type: 'roll', power: 0.7, aim: 0 });
-  assert.equal(game.hostState().racers.find((r) => r.playerId === 'a')!.progress, 0);
+  game.onInput('a', { type: 'roll', ...launch(0.5) });
+  assert.equal(game.playerState('a').me.ball, null, 'no rolling during the countdown');
 
   advance(COUNTDOWN_MS);
   assert.equal(game.hostState().phase, 'racing');
 
-  game.onInput('a', { type: 'roll', power: 0.7, aim: 0 });
-  game.onInput('a', { type: 'roll', power: 0.7, aim: 0 });
-  assert.equal(game.playerState('a').me.progress, 3);
-  assert.equal(game.playerState('a').me.rolls, 1);
-  assert.ok(game.playerState('a').cooldownMs > 0);
+  const sim = simulateRoll(launch(0.5).vx, launch(0.5).vy);
+  game.onInput('a', { type: 'roll', ...launch(0.5) });
+  game.onInput('a', { type: 'roll', ...launch(0.9) });
+  let s = game.playerState('a');
+  assert.ok(s.me.ball, 'ball is in play');
+  assert.ok(Math.abs(s.me.ball!.vy - launch(0.5).vy) < 1e-9, 'second roll ignored while the first is in play');
+  assert.equal(s.me.progress, 0, 'no points until it drops in');
+  assert.ok(s.cooldownMs > 0);
 
-  advance(ROLL_COOLDOWN_MS);
-  game.onInput('a', { type: 'roll', power: 0.7, aim: 0 });
-  assert.equal(game.playerState('a').me.progress, 6);
-  assert.equal(game.playerState('b').leaderProgress, 6);
+  advance(sim.outcome.endedAt + 50);
+  s = game.playerState('a');
+  assert.equal(s.me.progress, 1);
+  assert.equal(s.me.rolls, 1);
+  assert.equal(s.me.lastRoll?.zone, 'walk');
+  assert.ok(s.me.ball, 'ball still shown until the return delay passes');
+
+  advance(RETURN_DELAY_MS + 50);
+  s = game.playerState('a');
+  assert.equal(s.me.ball, null);
+  assert.equal(s.cooldownMs, 0);
+  assert.equal(game.playerState('b').leaderProgress, 1);
 });
 
 test('first racer to the line wins, then the game finishes after the linger', () => {
   const { game, advance } = makeGame(['a', 'b']);
   advance(COUNTDOWN_MS);
   let rolls = 0;
-  while (game.hostState().phase !== 'finished' && rolls < 20) {
-    game.onInput('a', { type: 'roll', power: 0.9, aim: 0 });
-    game.onInput('b', { type: 'roll', power: 0.2, aim: 0 });
-    advance(ROLL_COOLDOWN_MS);
+  while (game.hostState().phase !== 'finished' && rolls < 40) {
+    game.onInput('a', { type: 'roll', ...launch(0.9) });
+    game.onInput('b', { type: 'roll', ...launch(0.5) });
+    advance(2500);
     rolls++;
   }
   assert.equal(rolls, TRACK_LENGTH / 3);
@@ -123,9 +170,11 @@ test('malformed input is rejected', () => {
   const { game, advance } = makeGame(['a']);
   advance(COUNTDOWN_MS);
   // @ts-expect-error deliberately malformed
-  game.onInput('a', { type: 'roll', power: 'lots' });
+  game.onInput('a', { type: 'roll', vx: 'lots' });
   // @ts-expect-error deliberately malformed
   game.onInput('a', null);
-  game.onInput('nobody', { type: 'roll', power: 0.5, aim: 0 });
+  game.onInput('a', { type: 'roll', vx: 0, vy: -3 });
+  game.onInput('nobody', { type: 'roll', vx: 0, vy: 5 });
+  assert.equal(game.playerState('a').me.ball, null);
   assert.equal(game.playerState('a').me.rolls, 0);
 });

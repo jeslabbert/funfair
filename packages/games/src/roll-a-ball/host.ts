@@ -11,7 +11,7 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       <div class="rab-track-wrap"><canvas class="rab-track"></canvas></div>
       <aside class="rab-side">
         <h2>Roll-a-Ball Derby</h2>
-        <p class="rab-side-hint">Flick the ball up the ramp into the pyramid. Front holes make your horse walk (+1), the arrow makes it trot (+2), the back triangle makes it gallop (+3). First to the finish wins.</p>
+        <p class="rab-side-hint">Roll the ball up the slope into the pyramid: front holes walk (+1), the arrow trots (+2), the back triangle gallops (+3). Too soft and it rolls back, too hard and it skips the lip. First to the finish wins.</p>
         <ol class="rab-feed"></ol>
       </aside>
     </div>`;
@@ -185,12 +185,10 @@ function feedLabel(f: FeedEntry): string {
   switch (f.kind) {
     case 'hit':
       return `${f.zone ? ZONE_LABEL[f.zone] : ''} +${f.points}`;
-    case 'wide':
-      return 'wide';
-    case 'short':
-      return 'short';
     case 'gutter':
       return 'gutter!';
+    case 'back':
+      return 'rolled back';
   }
 }
 

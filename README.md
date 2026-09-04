@@ -103,19 +103,28 @@ can be unit-tested with `node:test` (`pnpm test`).
   - **Middle arrow = trot (+2)** – the full row under the triangle plus the outside edges
     of the front rows, forming a chevron.
   - **Front = walk (+1)** – everything inside the arrow.
-- A flick's **speed** sets how deep into the pyramid the ball goes (too soft falls short
-  on the ramp, too hard flies into the back gutter) and its **angle** drifts it sideways.
-  The ball drops into the nearest hole on the row it reaches; drift past the pyramid's
-  edge is "wide". Since the pyramid narrows towards the back, a gallop needs both power
-  and a straight roll, while a hard-to-the-side soft roll still finds a trot hole on the
-  arrow's arm.
+- The ball is **simulated**, not looked up. The whole board is inclined: gravity along the
+  slope slows the ball on the way up and pulls it back down, with rolling friction on top.
+  A flick sets a launch velocity with a real angle, and the side rails bounce, so bank
+  shots exist.
+- Every hole has a **lip**. Arrive too slowly and the ball can't climb it – it bounces back
+  and rolls downhill. Arrive too fast and it skips straight over (losing a little speed).
+  In between, it drops in. A ball that skips on the way up can still be caught by a hole on
+  the way back down, or roll all the way back to your hand for nothing. Off the top edge is
+  the back gutter.
+- There is no fixed cooldown: your next ball is ready when the current one drops in or
+  comes home, so a timid roll costs time rather than points.
+- The simulation is deterministic (fixed timestep, no trig, no randomness), so the phone
+  runs the same `simulateRoll` the server does to animate the ball and show lip/skip
+  moments as they happen, while the server stays authoritative for the score. Reloading
+  mid-roll picks the ball up in flight from the server's launch record.
 - Every point moves the player's horse one unit along a 30-unit track on the big screen.
   First across the line wins; the rest are ranked by distance.
-- Rolls are rate-limited server-side (0.9 s), so it's about aim rather than tapping speed.
-- Tuning knobs: `ROWS`, `GALLOP_FROM_ROW`, `TROT_ROW`, `ZONE_POINTS`, `MIN_POWER`,
-  `MAX_POWER`, `TRACK_LENGTH`, `ROLL_COOLDOWN_MS` in `logic.ts`; `POWER_SCALE` /
-  `AIM_SCALE` (gesture feel) at the top of `controller.ts`. These were set from desk
-  testing – expect to tweak `POWER_SCALE` after a round on real phones.
+- Tuning knobs, all in `logic.ts`: `BOARD` (geometry), `PHYSICS` (`slope`, `friction`,
+  `lipSpeed`, `captureSpeed`, `skipDamping`, rail/lip restitution, `maxLaunchSpeed`, launch
+  angle limit), zone layout (`ROWS`, `GALLOP_FROM_ROW`, `TROT_ROW`, `ZONE_POINTS`) and
+  `TRACK_LENGTH`. Gesture feel (`POWER_SCALE`) sits at the top of `controller.ts`. Expect to
+  tweak `POWER_SCALE`, `lipSpeed` and `captureSpeed` after a round on real phones.
 
 ## Roadmap
 
