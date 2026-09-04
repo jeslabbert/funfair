@@ -9,6 +9,7 @@ export default defineConfig({
       input: {
         host: resolve(__dirname, 'index.html'),
         play: resolve(__dirname, 'play/index.html'),
+        practice: resolve(__dirname, 'practice/index.html'),
       },
     },
   },

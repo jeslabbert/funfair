@@ -3,20 +3,47 @@ import { rollABallMeta } from './meta';
 import {
   COUNTDOWN_MS,
   FINISH_LINGER_MS,
-  ROLL_COOLDOWN_MS,
+  HOLES,
   TRACK_LENGTH,
+  cloneTable,
+  createTable,
+  grabBall,
   isRollInput,
+  launchBall,
+  msToTick,
   ordinal,
-  resolveRoll,
+  stepTable,
+  waveAt,
+  WAVE_NAMES,
+  type BallView,
   type FeedEntry,
   type RacePhase,
   type RacerState,
   type RollABallHostState,
   type RollABallInput,
   type RollABallPlayerState,
+  type RollKind,
+  type TableEvent,
+  type TableState,
+  type Zone,
 } from './logic';
 
 const FEED_LENGTH = 8;
+/** How far back (in ticks, 120/s) a late input may be applied: 300 ms. */
+export const MAX_REWIND_TICKS = 36;
+const HISTORY_SIZE = MAX_REWIND_TICKS + 4;
+
+/** One player's table, with enough history to rewind for late inputs. */
+interface RacerSim {
+  table: TableState;
+  history: (TableState | undefined)[];
+  /** Inputs must arrive in tick order; a later one can't rewind past an earlier one. */
+  lastInputTick: number;
+  /** Never rewind past something that scored or went on the feed. */
+  lastScoreTick: number;
+  /** Inputs stamped a little ahead of the table, applied when their tick comes. */
+  queued: RollABallInput[];
+}
 
 export class RollABallGame implements GameInstance<RollABallHostState, RollABallPlayerState, RollABallInput> {
   private phase: RacePhase = 'countdown';
@@ -26,12 +53,16 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
   private done = false;
   private winnerId: string | null = null;
   private readonly racers = new Map<string, RacerState>();
-  private readonly lastRollAt = new Map<string, number>();
+  private readonly sims = new Map<string, RacerSim>();
   private readonly feed: FeedEntry[] = [];
+  private readonly seed: number;
 
-  constructor(private readonly ctx: GameContext) {
+  constructor(ctx: GameContext) {
+    this.seed = Math.floor(ctx.random() * 0x7fffffff) >>> 0;
     for (const p of ctx.players) {
-      this.racers.set(p.id, { playerId: p.id, progress: 0, rolls: 0, lastRoll: null, finishedAt: null, rank: 1 });
+      const table = createTable(this.seed);
+      this.racers.set(p.id, { playerId: p.id, progress: 0, rolls: 0, lastRoll: null, balls: views(table), finishedAt: null, rank: 1 });
+      this.sims.set(p.id, { table, history: new Array(HISTORY_SIZE), lastInputTick: -1, lastScoreTick: -1, queued: [] });
     }
     this.updateRanks();
   }
@@ -40,28 +71,36 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
     if (this.phase !== 'racing') return;
     if (!isRollInput(input)) return;
     const racer = this.racers.get(playerId);
-    if (!racer || racer.finishedAt !== null) return;
+    const sim = this.sims.get(playerId);
+    if (!racer || !sim || racer.finishedAt !== null) return;
 
-    const now = this.ctx.now();
-    const last = this.lastRollAt.get(playerId) ?? -Infinity;
-    if (now - last < ROLL_COOLDOWN_MS) return;
-    this.lastRollAt.set(playerId, now);
-
-    const result = resolveRoll(input.power, input.aim);
-    racer.rolls += 1;
-    racer.progress = Math.min(TRACK_LENGTH, racer.progress + result.points);
-    racer.lastRoll = { ...result, seq: racer.rolls, power: input.power, aim: input.aim, at: this.raceMs };
-    this.feed.unshift({ playerId, seq: racer.rolls, points: result.points, kind: result.kind, at: this.raceMs });
-    if (this.feed.length > FEED_LENGTH) this.feed.length = FEED_LENGTH;
-
-    if (racer.progress >= TRACK_LENGTH) {
-      racer.finishedAt = this.raceMs;
-      if (this.winnerId === null) {
-        this.winnerId = playerId;
-        this.phase = 'finished';
-      }
+    // Apply the input at the tick the player did it, within reason.
+    const now = sim.table.tick;
+    const wanted = Math.floor(input.tick);
+    if (wanted > now) {
+      // A phone running a little ahead of us: hold the input for its tick.
+      const at = Math.min(wanted, now + MAX_REWIND_TICKS);
+      sim.queued.push({ ...input, tick: at });
+      sim.queued.sort((a, b) => a.tick - b.tick);
+      return;
     }
-    this.updateRanks();
+    let at = Math.max(now - MAX_REWIND_TICKS, wanted);
+    at = Math.max(at, sim.lastInputTick, sim.lastScoreTick);
+    if (at < now) {
+      const past = sim.history[at % HISTORY_SIZE];
+      if (past && past.tick === at) sim.table = cloneTable(past);
+      else at = now;
+    }
+    sim.lastInputTick = at;
+    this.apply(sim, input);
+    // Bring the table back up to date; anything that happens on the way scores as usual.
+    while (sim.table.tick < now) this.stepOne(racer, sim);
+    racer.balls = views(sim.table);
+  }
+
+  private apply(sim: RacerSim, input: RollABallInput): void {
+    if (input.type === 'grab') grabBall(sim.table, input.ball);
+    else launchBall(sim.table, input);
   }
 
   tick(dtMs: number): void {
@@ -74,13 +113,74 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
         }
         break;
       case 'racing':
+      case 'finished': {
         this.raceMs += dtMs;
+        const target = msToTick(this.raceMs);
+        let changed = false;
+        for (const racer of this.racers.values()) {
+          const sim = this.sims.get(racer.playerId)!;
+          const before = racer.progress;
+          while (sim.table.tick < target) this.stepOne(racer, sim);
+          racer.balls = views(sim.table);
+          if (racer.progress !== before) changed = true;
+        }
+        if (changed) this.updateRanks();
+        if (this.phase === 'finished') {
+          this.lingerMs -= dtMs;
+          if (this.lingerMs <= 0) this.done = true;
+        }
         break;
-      case 'finished':
-        this.raceMs += dtMs;
-        this.lingerMs -= dtMs;
-        if (this.lingerMs <= 0) this.done = true;
-        break;
+      }
+    }
+  }
+
+  private stepOne(racer: RacerState, sim: RacerSim): void {
+    // Inputs whose tick has come go in before this step.
+    while (sim.queued.length && sim.queued[0]!.tick <= sim.table.tick) {
+      const input = sim.queued.shift()!;
+      sim.lastInputTick = Math.max(sim.lastInputTick, sim.table.tick);
+      this.apply(sim, input);
+    }
+    const events: TableEvent[] = [];
+    stepTable(sim.table, events);
+    sim.history[sim.table.tick % HISTORY_SIZE] = cloneTable(sim.table);
+    for (const ev of events) this.score(racer, sim, ev);
+  }
+
+  private score(racer: RacerState, sim: RacerSim, ev: TableEvent): void {
+    if (racer.finishedAt !== null) return;
+    let kind: RollKind;
+    let points = 0;
+    let zone: Zone | null = null;
+    let row: number | null = null;
+    let col: number | null = null;
+    if (ev.type === 'hit') {
+      const hole = HOLES[ev.hole!]!;
+      kind = 'hit';
+      points = hole.points;
+      zone = hole.zone;
+      row = hole.row;
+      col = hole.col;
+    } else if (ev.type === 'gutter') {
+      kind = 'gutter';
+    } else if (ev.type === 'settle' && ev.crossedLip) {
+      kind = 'back';
+    } else {
+      return;
+    }
+    sim.lastScoreTick = ev.tick;
+    racer.rolls += 1;
+    racer.progress = Math.min(TRACK_LENGTH, racer.progress + points);
+    racer.lastRoll = { kind, points, zone, row, col, seq: racer.rolls, at: this.raceMs };
+    this.feed.unshift({ playerId: racer.playerId, seq: racer.rolls, points, kind, zone, at: this.raceMs });
+    if (this.feed.length > FEED_LENGTH) this.feed.length = FEED_LENGTH;
+
+    if (racer.progress >= TRACK_LENGTH) {
+      racer.finishedAt = this.raceMs;
+      if (this.winnerId === null) {
+        this.winnerId = racer.playerId;
+        this.phase = 'finished';
+      }
     }
   }
 
@@ -93,22 +193,28 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
       racers: this.orderedRacers(),
       feed: [...this.feed],
       winnerId: this.winnerId,
+      wave: this.currentWave(),
     };
   }
 
+  private currentWave(): RollABallHostState['wave'] {
+    if (this.phase === 'countdown') return null;
+    const w = waveAt(msToTick(this.raceMs), this.seed);
+    return w ? { kind: w.kind, name: WAVE_NAMES[w.kind], t: w.t, alpha: w.alpha } : null;
+  }
+
   playerState(playerId: string): RollABallPlayerState {
-    const me = this.racers.get(playerId) ?? { playerId, progress: 0, rolls: 0, lastRoll: null, finishedAt: null, rank: 0 };
-    const now = this.ctx.now();
-    const last = this.lastRollAt.get(playerId);
-    const cooldownMs = last === undefined ? 0 : Math.max(0, ROLL_COOLDOWN_MS - (now - last));
+    const me = this.racers.get(playerId) ?? { playerId, progress: 0, rolls: 0, lastRoll: null, balls: [], finishedAt: null, rank: 0 };
+    const table = this.sims.get(playerId)?.table ?? createTable(this.seed);
     let leaderProgress = 0;
     for (const r of this.racers.values()) leaderProgress = Math.max(leaderProgress, r.progress);
     return {
       phase: this.phase,
       countdownMs: this.countdownMs,
+      raceMs: this.raceMs,
       trackLength: TRACK_LENGTH,
       me,
-      cooldownMs,
+      table,
       leaderProgress,
       playerCount: this.racers.size,
       winnerId: this.winnerId,
@@ -144,6 +250,10 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
       prev = r;
     });
   }
+}
+
+function views(t: TableState): BallView[] {
+  return t.balls.map(({ id, x, y, status }) => ({ id, x, y, status }));
 }
 
 function compareRacers(a: RacerState, b: RacerState): number {

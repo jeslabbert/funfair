@@ -1,6 +1,6 @@
 import type { PlayerInfo } from '@funfair/shared';
 import type { HostView } from '@funfair/shared/client';
-import type { FeedEntry, RollABallHostState } from './logic';
+import { ZONE_LABEL, type FeedEntry, type RollABallHostState } from './logic';
 import { fitFont } from './controller';
 
 const LERP_RATE = 7; // higher = snappier catch-up to the server position
@@ -11,7 +11,8 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       <div class="rab-track-wrap"><canvas class="rab-track"></canvas></div>
       <aside class="rab-side">
         <h2>Roll-a-Ball Derby</h2>
-        <p class="rab-side-hint">Flick the ball up the ramp. Land it in a hole to move your horse: 10, 20, 30 or the tiny 50. First to the finish wins.</p>
+        <p class="rab-side-hint">Roll the ball up the slope into the pyramid: front holes walk (+1), the arrow trots (+2), the back triangle gallops (+3). Too soft and it rolls back, too hard and it skips the lip. First to the finish wins.</p>
+        <p class="rab-wave" hidden></p>
         <ol class="rab-feed"></ol>
       </aside>
     </div>`;
@@ -19,6 +20,7 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
   const canvas = root.querySelector<HTMLCanvasElement>('.rab-track')!;
   const wrap = root.querySelector<HTMLElement>('.rab-track-wrap')!;
   const feedEl = root.querySelector<HTMLOListElement>('.rab-feed')!;
+  const waveEl = root.querySelector<HTMLElement>('.rab-wave')!;
   const ctx = canvas.getContext('2d')!;
 
   let state: RollABallHostState | null = null;
@@ -121,7 +123,9 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       ctx.font = `${size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const bob = r.finishedAt === null && state!.phase !== 'countdown' ? Math.sin(now / 90 + i) * 2 : 0;
+      const fresh = r.lastRoll && state!.raceMs - r.lastRoll.at < 700 ? r.lastRoll.zone : null;
+      const amp = fresh === 'gallop' ? 6 : fresh === 'trot' ? 4 : 2;
+      const bob = r.finishedAt === null && state!.phase !== 'countdown' ? Math.sin(now / (fresh === 'gallop' ? 60 : 90) + i) * amp : 0;
       ctx.fillText(p?.avatar ?? '🐎', x, yc + bob);
 
       // Points bubble
@@ -131,6 +135,22 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       ctx.textAlign = 'center';
       ctx.fillText(label, x, yc - size * 0.72);
     });
+
+    // Obstacle wave arriving: a banner across the track
+    if (state.wave && state.phase === 'racing' && state.wave.t < 200) {
+      const u = state.wave.t / 200;
+      ctx.save();
+      ctx.globalAlpha = 1 - u * u;
+      ctx.fillStyle = 'rgba(255, 231, 76, 0.92)';
+      const bh = Math.min(90, H * 0.12);
+      ctx.fillRect(0, H * 0.44 - bh / 2 - u * 30, W, bh);
+      ctx.fillStyle = '#2a1600';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `900 ${Math.min(52, W * 0.04)}px system-ui, sans-serif`;
+      ctx.fillText(`⚠ ${state.wave.name.toUpperCase()} INCOMING`, W / 2, H * 0.44 - u * 30);
+      ctx.restore();
+    }
 
     // Overlays
     if (state.phase === 'countdown') {
@@ -170,6 +190,8 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
       state = next;
       players = new Map(playerList.map((p) => [p.id, p]));
       renderFeed();
+      waveEl.hidden = !next.wave;
+      if (next.wave) waveEl.textContent = `⚠ ${next.wave.name} on the tables`;
     },
     destroy() {
       cancelAnimationFrame(raf);
@@ -182,13 +204,11 @@ export function mountRollABallHost(root: HTMLElement): HostView<RollABallHostSta
 function feedLabel(f: FeedEntry): string {
   switch (f.kind) {
     case 'hit':
-      return `+${f.points}`;
-    case 'wide':
-      return 'wide';
-    case 'short':
-      return 'short';
+      return `${f.zone ? ZONE_LABEL[f.zone] : ''} +${f.points}`;
     case 'gutter':
       return 'gutter!';
+    case 'back':
+      return 'rolled back';
   }
 }
 

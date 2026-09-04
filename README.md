@@ -29,6 +29,9 @@ pnpm start        # http://0.0.0.0:3000
 
 Other scripts: `pnpm typecheck`, `pnpm test`.
 
+`/practice/` runs any single-player-capable game locally in the browser – no room, no
+server round-trips – handy for learning the controls or tuning the feel on a real phone.
+
 ### Installing the phone app
 
 Open `/play/` on the phone and use *Add to Home Screen*. The manifest and service worker
@@ -42,7 +45,7 @@ PWA experience).
 packages/shared   Protocol + game contracts shared by server and browser
 packages/games    One folder per game: rules, server instance, host view, phone view
 apps/server       Node + ws: rooms, sessions, reconnects, the game loop, static hosting
-apps/web          Vite app: /  = host screen,  /play/ = phone controller (PWA)
+apps/web          Vite app: / = host screen, /play/ = phone controller (PWA), /practice/ = solo range
 ```
 
 ### How a session works
@@ -94,15 +97,56 @@ can be unit-tested with `node:test` (`pnpm test`).
 
 ## Roll-a-Ball Derby
 
-- Phones show a top-down ramp. A flick gesture's **speed** sets the distance
-  (short → 10 → 20 → 30 → 50 → gutter) and its **angle** sets the aim; the higher holes are
-  smaller, so an off-centre flick that had the right power still misses ("wide").
-- Every point moves the player's horse one unit along a 40-unit track on the big screen.
+- Phones show a table in perspective: the bottom half is runway for the swipe, the top half
+  holds a **pyramid of holes** (5 rows, 15 holes), the classic Kentucky Derby board. Holes
+  are drawn with raised lips and a lit far wall, and a caught ball slides to the hole and
+  sinks behind the near lip. The ball itself is a real WebGL sphere (`ball3d.ts`): a lit
+  mesh with a spot pattern whose orientation is a quaternion driven by the distance rolled,
+  composited into the 2D scene so the hole clipping still applies. Painted fallback when
+  WebGL is unavailable. The pyramid's stagger means a dead-straight roll threads
+  between the holes of every other row – aim matters.
+  - **Back triangle = gallop (+3)** – the three holes at the apex.
+  - **Middle arrow = trot (+2)** – the full row under the triangle plus the outside edges
+    of the front rows, forming a chevron.
+  - **Front = walk (+1)** – everything inside the arrow.
+- The ball is **simulated**, not looked up. The whole board is inclined: gravity along the
+  slope slows the ball on the way up and pulls it back down, with rolling friction on top.
+  A flick sets a launch velocity with a real angle, and the side rails bounce, so bank
+  shots exist.
+- Every hole has a **lip**. Arrive too slowly and the ball can't climb it – it bounces back
+  and rolls downhill. Arrive too fast and it skips straight over (losing a little speed).
+  In between, it drops in. A ball that skips on the way up can still be caught by a hole on
+  the way back down, or roll all the way back to your hand for nothing. Off the top edge is
+  the back gutter.
+- Each player has **three balls** on the table and can keep all of them going at once: grab
+  the one nearest your finger, drag it anywhere on the ramp, flick, and grab the next while
+  the first is still rolling. The closer to the lip you let go, the less power you need.
+  A ball that comes back bounces off the front bumper and **stays where it settles**;
+  letting go without a flick just drops it (it rolls back down and doesn't count as a
+  roll). Balls that drop into a hole come back through the chute a moment later. The whole
+  table is one simulation, so balls knock each other about.
+- The table is a **continuously stepped, deterministic simulation** (120 steps/s, fixed
+  timestep, no trig, no randomness) that runs on the phone and the server alike. Grabs and
+  flicks are inputs stamped with the tick they happened on. The server keeps 300 ms of
+  table history and rewinds to apply a late-arriving input at its real tick, so what the
+  player saw is what gets scored; the phone runs ahead of the server, keeps its own short
+  history, and only adopts a server snapshot when the two disagree (then replays its
+  newer inputs on top). Reloading mid-race picks the table up from the next snapshot.
+- **Obstacle waves** keep it chaotic. After a six-second grace, nine-second waves roll
+  through in a seed-dependent order: a *sweeper* post sliding across the lane, a *double
+  sweeper* on two rows, a *windmill* turning in the middle of the pyramid, and *lids* that
+  cover one zone's holes at a time. Waves fade in intangible so they never land on a ball,
+  the phone flashes a warning and the big screen shows a banner. Obstacles are a pure
+  function of the tick and the race seed (with an arithmetic-only sine), so both sides
+  agree on them without sending anything.
+- Every point moves the player's horse one unit along a 30-unit track on the big screen.
   First across the line wins; the rest are ranked by distance.
-- Rolls are rate-limited server-side (0.9 s), so it's about aim rather than tapping speed.
-- Tuning knobs: `HOLES`, `TRACK_LENGTH`, `ROLL_COOLDOWN_MS` in `logic.ts`;
-  `POWER_SCALE` / `AIM_SCALE` (gesture feel) at the top of `controller.ts`. These were
-  set from desk testing – expect to tweak `POWER_SCALE` after a round on real phones.
+- Tuning knobs, all in `logic.ts`: `BOARD` (geometry), `PHYSICS` (`slope`, `friction`,
+  `lipSpeed`, `captureSpeed`, `skipDamping`, rail/lip restitution, `maxLaunchSpeed`, launch
+  angle limit), zone layout (`ROWS`, `GALLOP_FROM_ROW`, `TROT_ROW`, `ZONE_POINTS`) and
+  `TRACK_LENGTH`. Gesture feel sits at the top of `controller.ts`: power is half snap speed
+  (`POWER_SCALE`) and half swipe length (`DISTANCE_SCALE`). Expect to tweak those two,
+  `lipSpeed` and `captureSpeed` after a round on real phones.
 
 ## Roadmap
 

@@ -39,6 +39,15 @@
   font-size: 0.95rem;
   line-height: 1.35;
 }
+.rab-wave {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(255, 231, 76, 0.18);
+  border: 1px solid rgba(255, 231, 76, 0.5);
+  color: #ffe74c;
+  font-weight: 700;
+}
 .rab-feed {
   list-style: none;
   margin: 8px 0 0;
@@ -75,10 +84,11 @@
 .rab-feed-hit .rab-feed-result {
   color: #5ce07a;
 }
-.rab-feed-wide .rab-feed-result,
-.rab-feed-short .rab-feed-result,
 .rab-feed-gutter .rab-feed-result {
   color: #ff8a8a;
+}
+.rab-feed-back .rab-feed-result {
+  color: rgba(255, 255, 255, 0.55);
 }
 @keyframes rab-feed-in {
   from {
