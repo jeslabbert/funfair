@@ -9,15 +9,18 @@ import {
   clamp,
   clampLaunch,
   clampLaunchPosition,
+  cloneTable,
+  grabBall,
+  launchBall,
+  msToTick,
   ordinal,
-  simulateRoll,
-  type BallAtRest,
-  type BallView,
+  stepTable,
+  tablesMatch,
+  type BallState,
   type RollABallInput,
   type RollABallPlayerState,
-  type RollEvent,
-  type RollKind,
-  type RollSimulation,
+  type TableEvent,
+  type TableState,
   type Zone,
 } from './logic';
 import { QUAT_IDENTITY, createBallRenderer, quatFromAxisAngle, quatMultiply, quatNormalize, type Quat } from './ball3d';
@@ -35,6 +38,12 @@ const LABEL_MS = 650;
 const SINK_MS = 340;
 const HOP_MS = 160;
 const APPEAR_MS = 260;
+/** Local prediction keeps this many ticks of history to check against server snapshots. */
+const LOCAL_HISTORY = 96;
+/** Pending inputs are kept this long in case a snapshot arrives that predates them. */
+const PENDING_INPUT_MS = 800;
+/** Never step more than this per frame (a backgrounded tab catching up). */
+const MAX_STEPS_PER_FRAME = 48;
 /** Vertical squash of circles on the receding table (viewing angle). */
 const SQUASH = 0.68;
 
@@ -44,22 +53,6 @@ interface Sample {
   t: number;
 }
 
-interface Flight {
-  sim: RollSimulation;
-  /** performance.now() at launch. */
-  launchedAt: number;
-  rollsBefore: number;
-  /** True when the roll never left the ramp: the server won't count it, so don't wait for it to. */
-  isDrop: boolean;
-  /** Set once the server confirms the roll. */
-  confirmed: { points: number; kind: RollKind; zone: Zone | null } | null;
-  popupAt: number | null;
-  /** Index into sim.events of the next event to announce. */
-  nextEvent: number;
-  /** Only the first skip of a roll gets a label; the rest would just stack up. */
-  skipShown: boolean;
-}
-
 interface Drag {
   ballId: number;
   pointerId: number;
@@ -67,6 +60,25 @@ interface Drag {
   x: number;
   y: number;
   samples: Sample[];
+}
+
+interface Sink {
+  id: number;
+  from: { x: number; y: number };
+  hole: { x: number; y: number; zone: Zone };
+  at: number;
+}
+
+interface Splash {
+  id: number;
+  from: { x: number; y: number };
+  at: number;
+}
+
+interface Popup {
+  text: string;
+  color: string;
+  at: number;
 }
 
 interface BallPose {
@@ -125,9 +137,17 @@ export function mountRollABallController(
   let state: RollABallPlayerState | null = null;
   let me: PlayerInfo | null = null;
   let players = new Map<string, PlayerInfo>();
-  let flight: Flight | null = null;
+  /** The predicted table: stepped locally, checked against server snapshots. */
+  let table: TableState | null = null;
+  const localHistory: (TableState | undefined)[] = new Array(LOCAL_HISTORY);
+  /** Race clock estimate: raceMs ≈ performance.now() + raceOffset. */
+  let raceOffset = -Infinity;
+  let pending: { input: RollABallInput; sentAt: number }[] = [];
   let drag: Drag | null = null;
   let labels: FloatingLabel[] = [];
+  let sinks: Sink[] = [];
+  let splashes: Splash[] = [];
+  let popup: Popup | null = null;
   let raf = 0;
   let W = 0;
   let H = 0;
@@ -136,6 +156,7 @@ export function mountRollABallController(
   const orientation = new Map<number, Quat>();
   const spin2d = new Map<number, Spin2D>();
   const prevBoard = new Map<number, { x: number; y: number }>();
+  const trails = new Map<number, { x: number; y: number }[]>();
   const lastHopAt = new Map<number, number>();
   /** When each ball last (re)appeared on the table, for a fade-in. */
   const appearedAt = new Map<number, number>();
@@ -177,23 +198,77 @@ export function mountRollABallController(
   };
   const ballPx = (cy: number) => unitAt(cy) * PHYSICS.ballRadius * 1.15;
 
-  // ---- what's on the table right now ---------------------------------
-  /** Balls at rest, from the live roll's final positions once it has settled, else the server's view. */
-  function restingBalls(): BallView[] {
-    if (flight) {
-      return flight.sim.final.map((b) => ({ ...b, status: 'resting' as const }));
+  // ---- local simulation ---------------------------------------------------
+  function racing() {
+    return !!state && (state.phase === 'racing' || state.phase === 'finished');
+  }
+
+  function raceNow(now: number) {
+    return raceOffset === -Infinity ? 0 : now + raceOffset;
+  }
+
+  function remember(t: TableState) {
+    localHistory[t.tick % LOCAL_HISTORY] = cloneTable(t);
+  }
+
+  /** Step the predicted table up to the current race clock, announcing what happens. */
+  function advanceLocal(now: number) {
+    if (!table || !racing()) return;
+    const target = msToTick(raceNow(now));
+    let steps = 0;
+    while (table.tick < target && steps++ < MAX_STEPS_PER_FRAME) {
+      const events: TableEvent[] = [];
+      stepTable(table, events);
+      remember(table);
+      for (const ev of events) onEvent(ev, now);
     }
-    return state?.me.balls.filter((b) => b.status === 'resting') ?? [];
   }
 
-  function tableLive(now: number) {
-    return !!flight && now - flight.launchedAt < flight.sim.outcome.endedAt;
+  /** Adopt a server snapshot if our prediction disagrees with it, keeping our newer inputs. */
+  function reconcile(snapshot: TableState) {
+    const now = performance.now();
+    pending = pending.filter((p) => now - p.sentAt < PENDING_INPUT_MS);
+    if (!table) {
+      table = cloneTable(snapshot);
+      remember(table);
+      return;
+    }
+    if (snapshot.tick <= table.tick) {
+      const ours = localHistory[snapshot.tick % LOCAL_HISTORY];
+      if (ours && ours.tick === snapshot.tick && tablesMatch(ours, snapshot)) return; // in step
+    }
+    // Out of step: take the server's word and replay up to where we were.
+    const wasAt = table.tick;
+    table = cloneTable(snapshot);
+    if (drag) {
+      const held = table.balls.find((b) => b.id === drag!.ballId);
+      if (held && held.status === 'resting') grabBall(table, held.id);
+    }
+    remember(table);
+    const replay = pending.map((p) => p.input).filter((i) => i.tick > snapshot.tick);
+    while (table.tick < wasAt) {
+      for (const input of replay) {
+        if (input.tick !== table.tick) continue;
+        if (input.type === 'grab') grabBall(table, input.ball);
+        else launchBall(table, input);
+      }
+      const events: TableEvent[] = [];
+      stepTable(table, events);
+      remember(table);
+    }
   }
 
-  function canGrab(now: number) {
-    if (!state || state.phase !== 'racing' || state.me.finishedAt !== null || drag) return false;
-    if (flight) return false;
-    return state.cooldownMs === 0 && state.me.flight === null;
+  function sendInput(input: RollABallInput) {
+    pending.push({ input, sentAt: performance.now() });
+    send(input);
+  }
+
+  function restingBalls(): BallState[] {
+    return table?.balls.filter((b) => b.status === 'resting') ?? [];
+  }
+
+  function canGrab() {
+    return !!state && state.phase === 'racing' && state.me.finishedAt === null && !drag && !!table;
   }
 
   // ---- input --------------------------------------------------------------
@@ -203,11 +278,10 @@ export function mountRollABallController(
   }
 
   canvas.addEventListener('pointerdown', (e) => {
-    const now = performance.now();
-    if (!canGrab(now)) return;
+    if (!canGrab()) return;
     const p = pointerPos(e);
     // Nearest resting ball, within a generous reach.
-    let best: BallView | null = null;
+    let best: BallState | null = null;
     let bestD = Math.max(60, W * 0.3);
     for (const b of restingBalls()) {
       const c = toCanvas(b.x, b.y);
@@ -217,7 +291,7 @@ export function mountRollABallController(
         best = b;
       }
     }
-    if (!best) return;
+    if (!best || !table) return;
     const at = clampLaunchPosition(best.x, best.y);
     drag = { ballId: best.id, pointerId: e.pointerId, x: at.x, y: at.y, samples: [{ x: e.clientX, y: e.clientY, t: e.timeStamp }] };
     try {
@@ -225,6 +299,8 @@ export function mountRollABallController(
     } catch {
       /* synthetic pointer */
     }
+    grabBall(table, best.id);
+    sendInput({ type: 'grab', ball: best.id, tick: table.tick });
     buzz(8);
   });
   canvas.addEventListener('pointermove', (e) => {
@@ -243,50 +319,85 @@ export function mountRollABallController(
     const speed = gesture ? gesture.power * PHYSICS.maxLaunchSpeed : 0;
     const vel = gesture ? clampLaunch(speed * gesture.dirX, speed * gesture.dirY) : { vx: 0, vy: 0 };
     const launch = { ball: drag.ballId, x: drag.x, y: drag.y, vx: vel.vx, vy: vel.vy };
-    const atRest: BallAtRest[] = restingBalls().map(({ id, x, y }) => ({ id, x, y }));
     drag = null;
-    if (!state || state.phase !== 'racing') return;
-    startFlight(simulateRoll(launch, atRest), performance.now(), state.me.rolls);
-    send({ type: 'roll', ...launch });
+    if (!table || !state || state.phase !== 'racing') return;
+    launchBall(table, launch);
+    sendInput({ type: 'roll', ...launch, tick: table.tick });
   };
   canvas.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
 
-  function startFlight(sim: RollSimulation, launchedAt: number, rollsBefore: number) {
-    const isDrop = sim.outcome.kind === 'back' && sim.outcome.peakY < BOARD.rampLength && sim.captures.length === 0;
-    flight = { sim, launchedAt, rollsBefore, isDrop, confirmed: null, popupAt: null, nextEvent: 0, skipShown: false };
-    labels = [];
-    prevBoard.clear();
+  /** Something happened on the table: labels, haptics, sink animations, popups. */
+  function onEvent(ev: TableEvent, now: number) {
+    switch (ev.type) {
+      case 'lip':
+      case 'skip': {
+        const label = eventLabel(ev);
+        if (label) labels.push({ ...label, x: ev.x, y: ev.y, at: now });
+        lastHopAt.set(ev.ball, now);
+        buzz(10);
+        break;
+      }
+      case 'rail':
+      case 'bumper':
+      case 'ball':
+        buzz(6);
+        break;
+      case 'hit': {
+        const hole = HOLES[ev.hole!]!;
+        sinks.push({ id: ev.ball, from: { x: ev.x, y: ev.y }, hole: { ...toCanvasHole(hole), zone: hole.zone }, at: now });
+        popup = { text: `${ZONE_LABEL[hole.zone].toUpperCase()} +${hole.points}`, color: ZONE_COLORS[hole.zone], at: now };
+        buzz([30, 40, 30]);
+        break;
+      }
+      case 'gutter':
+        splashes.push({ id: ev.ball, from: { x: ev.x, y: ev.y }, at: now });
+        popup = { text: 'GUTTER', color: 'rgba(255,255,255,0.75)', at: now };
+        buzz(15);
+        break;
+      case 'settle':
+        if (ev.crossedLip) popup = { text: 'ROLLED BACK', color: 'rgba(255,255,255,0.6)', at: now };
+        break;
+      case 'return':
+        appearedAt.set(ev.ball, now);
+        break;
+      case 'launch':
+        trails.delete(ev.ball);
+        break;
+    }
   }
 
-  /** Advance each moving ball's spin by how far it rolled since the last frame. */
-  function updateSpins(now: number) {
-    if (!flight) return;
-    const { sim } = flight;
-    const n = sim.ids.length;
-    const t = now - flight.launchedAt;
-    const last = sim.frames.length / (n * 2) - 1;
-    const i = clamp(Math.floor(t / PHYSICS.stepMs), 0, last);
-    for (let k = 0; k < n; k++) {
-      const id = sim.ids[k]!;
-      const bx = sim.frames[(i * n + k) * 2]!;
-      const by = sim.frames[(i * n + k) * 2 + 1]!;
-      if (Number.isNaN(bx)) continue;
-      const prev = prevBoard.get(id);
+  function toCanvasHole(h: { x: number; y: number }) {
+    return toCanvas(h.x, h.y);
+  }
+
+  /** Advance each rolling ball's spin and trail by how far it moved since the last frame. */
+  function updateSpins() {
+    if (!table) return;
+    for (const b of table.balls) {
+      if (b.status !== 'rolling' && b.status !== 'resting') {
+        prevBoard.delete(b.id);
+        continue;
+      }
+      const prev = prevBoard.get(b.id);
       if (prev) {
-        const dx = bx - prev.x;
-        const dy = by - prev.y;
+        const dx = b.x - prev.x;
+        const dy = b.y - prev.y;
         const ds = Math.sqrt(dx * dx + dy * dy);
         if (ds > 1e-4) {
           const angle = ds / PHYSICS.ballRadius;
-          const s = spin2d.get(id) ?? { spin: 0, dirX: 0, dirY: -1 };
-          spin2d.set(id, { spin: s.spin + angle, dirX: dx / ds, dirY: -dy / ds });
+          const s = spin2d.get(b.id) ?? { spin: 0, dirX: 0, dirY: -1 };
+          spin2d.set(b.id, { spin: s.spin + angle, dirX: dx / ds, dirY: -dy / ds });
           // A ball rolling along d on a table with normal z turns about z × d.
-          const q = orientation.get(id) ?? QUAT_IDENTITY;
-          orientation.set(id, quatNormalize(quatMultiply(quatFromAxisAngle(-dy, dx, 0, angle), q)));
+          const q = orientation.get(b.id) ?? QUAT_IDENTITY;
+          orientation.set(b.id, quatNormalize(quatMultiply(quatFromAxisAngle(-dy, dx, 0, angle), q)));
         }
       }
-      prevBoard.set(id, { x: bx, y: by });
+      prevBoard.set(b.id, { x: b.x, y: b.y });
+      const trail = trails.get(b.id) ?? [];
+      trail.push({ x: b.x, y: b.y });
+      if (trail.length > 12) trail.shift();
+      trails.set(b.id, trail);
     }
   }
 
@@ -295,10 +406,10 @@ export function mountRollABallController(
     raf = requestAnimationFrame(frame);
     if (!W || !H) return;
     ctx.clearRect(0, 0, W, H);
+    advanceLocal(now);
+    updateSpins();
     drawBoard();
     drawHoles();
-    announceEvents(now);
-    updateSpins(now);
     drawBalls(now);
     drawLabels(now);
     drawPopup(now);
@@ -494,70 +605,48 @@ export function mountRollABallController(
   /** Where every ball is on screen this frame. */
   function poses(now: number): BallPose[] {
     const out: BallPose[] = [];
-    if (flight) {
-      const { sim } = flight;
-      const n = sim.ids.length;
-      const t = now - flight.launchedAt;
-      const last = sim.frames.length / (n * 2) - 1;
-      const i = clamp(Math.floor(t / PHYSICS.stepMs), 0, last);
-      for (let k = 0; k < n; k++) {
-        const id = sim.ids[k]!;
-        const bx = sim.frames[(i * n + k) * 2]!;
-        const by = sim.frames[(i * n + k) * 2 + 1]!;
-        if (!Number.isNaN(bx)) {
-          const { x, y } = toCanvas(bx, by);
-          out.push({ id, x, y, scale: 1, alpha: 1, lifted: false, sinkingInto: null, sink: 0 });
-          continue;
-        }
-        // Off the table: dropping into a hole or the gutter.
-        const cap = sim.captures.find((c) => c.ball === k);
-        if (cap) {
-          const s = clamp((t - cap.t) / SINK_MS, 0, 1);
-          if (s >= 1) continue;
-          const ev = sim.events.find((e) => e.type === 'hit' && e.ball === k)!;
-          const from = toCanvas(ev.x, ev.y);
-          const hole = holeFor(cap.hole.row, cap.hole.col);
-          const slide = clamp(s / 0.45, 0, 1);
-          const eased = 1 - Math.pow(1 - slide, 2);
-          const drop = clamp((s - 0.3) / 0.7, 0, 1);
-          const { ry } = holeSize(hole.y);
-          out.push({
-            id,
-            x: from.x + (hole.x - from.x) * eased,
-            y: from.y + (hole.y - from.y) * eased + drop * drop * ry * 2.4,
-            scale: 1 - drop * 0.25,
-            alpha: 1 - clamp((s - 0.75) / 0.25, 0, 1),
-            lifted: false,
-            sinkingInto: hole,
-            sink: drop,
-          });
-          continue;
-        }
-        const gut = sim.events.find((e) => e.type === 'gutter' && e.ball === k);
-        if (gut) {
-          const s = clamp((t - gut.t) / SINK_MS, 0, 1);
-          if (s >= 1) continue;
-          const { x, y } = toCanvas(gut.x, gut.y);
-          out.push({ id, x, y: y - s * H * 0.02, scale: 1 - s * 0.6, alpha: 1 - s, lifted: false, sinkingInto: null, sink: 0 });
-        }
-      }
-      return out;
-    }
-
-    for (const b of state?.me.balls ?? []) {
-      if (b.status !== 'resting') {
-        appearedAt.delete(b.id);
-        continue;
-      }
-      if (!appearedAt.has(b.id)) appearedAt.set(b.id, now);
-      const fade = clamp((now - appearedAt.get(b.id)!) / APPEAR_MS, 0, 1);
+    if (!table) return out;
+    for (const b of table.balls) {
       if (drag && drag.ballId === b.id) {
         const { x, y } = toCanvas(drag.x, drag.y);
         out.push({ id: b.id, x, y, scale: 1.12, alpha: 1, lifted: true, sinkingInto: null, sink: 0 });
-      } else {
-        const { x, y } = toCanvas(b.x, b.y);
-        out.push({ id: b.id, x, y, scale: 0.6 + 0.4 * fade, alpha: fade, lifted: false, sinkingInto: null, sink: 0 });
+        continue;
       }
+      if (b.status === 'returning') {
+        appearedAt.delete(b.id);
+        continue;
+      }
+      const seen = appearedAt.get(b.id);
+      const fade = seen === undefined ? 1 : clamp((now - seen) / APPEAR_MS, 0, 1);
+      const { x, y } = toCanvas(b.x, b.y);
+      out.push({ id: b.id, x, y, scale: 0.6 + 0.4 * fade, alpha: fade, lifted: b.status === 'held', sinkingInto: null, sink: 0 });
+    }
+    // Balls on their way into a hole
+    sinks = sinks.filter((k) => now - k.at < SINK_MS);
+    for (const k of sinks) {
+      const s = clamp((now - k.at) / SINK_MS, 0, 1);
+      const from = toCanvas(k.from.x, k.from.y);
+      const slide = clamp(s / 0.45, 0, 1);
+      const eased = 1 - Math.pow(1 - slide, 2);
+      const drop = clamp((s - 0.3) / 0.7, 0, 1);
+      const { ry } = holeSize(k.hole.y);
+      out.push({
+        id: k.id,
+        x: from.x + (k.hole.x - from.x) * eased,
+        y: from.y + (k.hole.y - from.y) * eased + drop * drop * ry * 2.4,
+        scale: 1 - drop * 0.25,
+        alpha: 1 - clamp((s - 0.75) / 0.25, 0, 1),
+        lifted: false,
+        sinkingInto: k.hole,
+        sink: drop,
+      });
+    }
+    // …or into the gutter
+    splashes = splashes.filter((k) => now - k.at < SINK_MS);
+    for (const k of splashes) {
+      const s = clamp((now - k.at) / SINK_MS, 0, 1);
+      const { x, y } = toCanvas(k.from.x, k.from.y);
+      out.push({ id: k.id, x, y: y - s * H * 0.02, scale: 1 - s * 0.6, alpha: 1 - s, lifted: false, sinkingInto: null, sink: 0 });
     }
     return out;
   }
@@ -622,28 +711,16 @@ export function mountRollABallController(
     }
   }
 
-  /** Ghosts behind the rolled ball while it's quick. */
-  function drawTrail(now: number, r: number, color: string) {
-    if (!flight) return;
-    const { sim } = flight;
-    const n = sim.ids.length;
-    const k = sim.launched;
-    const t = now - flight.launchedAt;
-    const last = sim.frames.length / (n * 2) - 1;
-    const i = clamp(Math.floor(t / PHYSICS.stepMs), 0, last);
-    if (i < 2) return;
-    const at = (j: number) => ({ x: sim.frames[(j * n + k) * 2]!, y: sim.frames[(j * n + k) * 2 + 1]! });
-    const a = at(i);
-    const b = at(i - 1);
-    if (Number.isNaN(a.x) || Number.isNaN(b.x)) return;
-    const speed = Math.hypot(a.x - b.x, a.y - b.y) / (PHYSICS.stepMs / 1000);
+  /** Ghosts behind a quick ball. */
+  function drawTrail(b: BallState, r: number, color: string) {
+    const trail = trails.get(b.id);
+    if (!trail || trail.length < 8) return;
+    const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
     const strength = clamp((speed - 3) / 9, 0, 1);
     if (strength <= 0) return;
     for (let g = 1; g <= 3; g++) {
-      const j = i - g * 3;
-      if (j < 0) break;
-      const p = at(j);
-      if (Number.isNaN(p.x)) break;
+      const p = trail[trail.length - 1 - g * 2];
+      if (!p) break;
       const { x, y } = toCanvas(p.x, p.y);
       ctx.beginPath();
       ctx.arc(x, y, r * (1 - g * 0.12), 0, Math.PI * 2);
@@ -654,13 +731,13 @@ export function mountRollABallController(
 
   function drawBalls(now: number) {
     const color = me?.color ?? '#fff';
-    const live = tableLive(now);
-    const grab = canGrab(now);
+    const grab = canGrab();
     const list = poses(now).sort((a, b) => a.y - b.y);
-    if (flight) {
-      const launchedId = flight.sim.ids[flight.sim.launched]!;
-      const p = list.find((q) => q.id === launchedId);
-      if (p && live) drawTrail(now, ballPx(p.y), color);
+    if (table) {
+      for (const b of table.balls) {
+        if (b.status !== 'rolling') continue;
+        drawTrail(b, ballPx(toCanvas(b.x, b.y).y), color);
+      }
     }
     for (const pose of list) {
       const hopT = (now - (lastHopAt.get(pose.id) ?? -Infinity)) / HOP_MS;
@@ -669,7 +746,6 @@ export function mountRollABallController(
       const r = ballPx(pose.y) * pose.scale * (1 + hop * 0.12);
       const bx = pose.x;
       const by = pose.y - lift * r * 0.8;
-      const dimIdle = !live && !grab && !pose.lifted && !pose.sinkingInto ? 0.35 : 0;
 
       // Contact shadow: drifts away from a lifted or hopping ball
       if (!pose.sinkingInto || pose.sink < 0.5) {
@@ -691,38 +767,23 @@ export function mountRollABallController(
         ctx.restore();
         drawHoleFront(pose.sinkingInto.x, pose.sinkingInto.y, pose.sinkingInto.zone);
       } else {
-        paintBall(pose.id, bx, by, r, color, pose.alpha, dimIdle);
+        paintBall(pose.id, bx, by, r, color, pose.alpha, 0);
       }
     }
 
-    if (grab && !drag && list.length) {
-      // Nudge: point at the nearest ball to the middle of the bumper
+    if (grab && list.length && restingBalls().length) {
+      // Nudge: point at the resting ball nearest the middle of the bumper
       const rest = toCanvas(0, BOARD.ballStartY);
-      const p = list.reduce((a, b) => (Math.abs(a.x - rest.x) < Math.abs(b.x - rest.x) ? a : b));
-      ctx.fillStyle = 'rgba(255,255,255,0.7)';
-      ctx.font = `600 ${Math.max(12, W * 0.035)}px system-ui, sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('▲ grab & flick', p.x, p.y - ballPx(p.y) - 16 + Math.sin(now / 250) * 3);
-    }
-  }
-
-  /** Turn simulation events into little on-board labels and haptics as the balls reach them. */
-  function announceEvents(now: number) {
-    if (!flight) return;
-    const t = now - flight.launchedAt;
-    const events = flight.sim.events;
-    while (flight.nextEvent < events.length && events[flight.nextEvent]!.t <= t) {
-      const ev = events[flight.nextEvent++]!;
-      const id = flight.sim.ids[ev.ball]!;
-      const label = eventLabel(ev);
-      if (label && !(ev.type === 'skip' && flight.skipShown)) labels.push({ ...label, x: ev.x, y: ev.y, at: now });
-      if (ev.type === 'skip') flight.skipShown = true;
-      if (ev.type === 'lip' || ev.type === 'skip') {
-        buzz(10);
-        lastHopAt.set(id, now);
+      const ids = new Set(restingBalls().map((b) => b.id));
+      const candidates = list.filter((p) => ids.has(p.id));
+      if (candidates.length) {
+        const p = candidates.reduce((a, b) => (Math.abs(a.x - rest.x) < Math.abs(b.x - rest.x) ? a : b));
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = `600 ${Math.max(12, W * 0.035)}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('▲ grab & flick', p.x, p.y - ballPx(p.y) - 16 + Math.sin(now / 250) * 3);
       }
-      if (ev.type === 'rail' || ev.type === 'bumper' || ev.type === 'ball') buzz(6);
     }
   }
 
@@ -745,42 +806,23 @@ export function mountRollABallController(
   }
 
   function drawPopup(now: number) {
-    if (!flight) return;
-    const t = now - flight.launchedAt;
-    const settled = t >= flight.sim.outcome.endedAt;
-    const serverDone = !!state && state.me.flight === null && state.cooldownMs === 0;
-
-    if (flight.isDrop) {
-      if (settled && serverDone) flight = null;
-      return;
-    }
-    if (settled && flight.confirmed && flight.popupAt === null) {
-      flight.popupAt = now;
-      buzz(flight.confirmed.kind === 'hit' ? [30, 40, 30] : 15);
-    }
-    if (flight.popupAt === null) {
-      // Server never confirmed (e.g. it rejected the roll): let the flight expire quietly.
-      if (settled && serverDone && t > flight.sim.outcome.endedAt + 1500) flight = null;
-      return;
-    }
-    const u = (now - flight.popupAt) / POPUP_MS;
+    if (!popup) return;
+    const u = (now - popup.at) / POPUP_MS;
     if (u > 1) {
-      if (serverDone) flight = null;
+      popup = null;
       return;
     }
-    const { kind, points, zone } = flight.confirmed!;
-    const text = kind === 'hit' && zone ? `${ZONE_LABEL[zone].toUpperCase()} +${points}` : kind === 'gutter' ? 'GUTTER' : 'ROLLED BACK';
     // Popups live in the ramp area so they never cover the board or legend.
     const y = (yTo(BOARD.rampLength) + yTo(BOARD.ballStartY)) / 2 - u * 40;
     ctx.globalAlpha = 1 - u * u;
-    ctx.fillStyle = kind === 'hit' && zone ? ZONE_COLORS[zone] : 'rgba(255,255,255,0.75)';
-    fitFont(ctx, text, 900, Math.max(26, W * 0.12), W * 0.85);
+    ctx.fillStyle = popup.color;
+    fitFont(ctx, popup.text, 900, Math.max(26, W * 0.12), W * 0.85);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineWidth = 6;
     ctx.strokeStyle = 'rgba(0,0,0,0.5)';
-    ctx.strokeText(text, cx(), y);
-    ctx.fillText(text, cx(), y);
+    ctx.strokeText(popup.text, cx(), y);
+    ctx.fillText(popup.text, cx(), y);
     ctx.globalAlpha = 1;
   }
 
@@ -824,15 +866,10 @@ export function mountRollABallController(
       me = meInfo;
       players = new Map(playerList.map((p) => [p.id, p]));
 
-      if (flight && !flight.confirmed && next.me.rolls > flight.rollsBefore && next.me.lastRoll) {
-        flight.confirmed = { points: next.me.lastRoll.points, kind: next.me.lastRoll.kind, zone: next.me.lastRoll.zone };
-      }
-      // A roll in progress on the server but not here (reconnect / reload mid-roll): pick it up in progress.
-      if (!flight && next.me.flight) {
-        const elapsed = next.raceMs - next.me.flight.launchedAt;
-        const sim = simulateRoll(next.me.flight.launch, next.me.flight.atRest);
-        if (elapsed < sim.outcome.endedAt) startFlight(sim, performance.now() - elapsed, next.me.rolls);
-      }
+      // Race clock: the earliest-arriving snapshots give the best estimate.
+      const sample = next.raceMs - performance.now();
+      raceOffset = raceOffset === -Infinity ? sample : Math.max(sample, raceOffset - 2);
+      reconcile(next.table);
 
       rankEl.textContent = next.phase === 'countdown' ? 'Ready?' : `${ordinal(next.me.rank)} of ${next.playerCount}`;
       scoreEl.textContent = `${next.me.progress} / ${next.trackLength}`;
@@ -842,10 +879,10 @@ export function mountRollABallController(
       hintEl.textContent =
         next.phase === 'racing'
           ? next.me.progress >= next.leaderProgress
-            ? "You're leading — keep rolling!"
+            ? "You're leading — keep them rolling!"
             : `${next.leaderProgress - next.me.progress} behind the leader`
           : next.phase === 'countdown'
-            ? 'Grab a ball, drag it up the ramp and flick. Balls stay where they land.'
+            ? 'Grab a ball, drag it up the ramp and flick. Keep all three going!'
             : 'Race over!';
       el.classList.toggle('rab-ctl-finished', next.phase === 'finished');
     },
@@ -857,7 +894,7 @@ export function mountRollABallController(
   };
 }
 
-function eventLabel(ev: RollEvent): { text: string; color: string } | null {
+function eventLabel(ev: TableEvent): { text: string; color: string } | null {
   switch (ev.type) {
     case 'lip':
       return { text: 'lip!', color: '#ffb547' };

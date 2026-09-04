@@ -124,30 +124,13 @@ export const HOLES: readonly Hole[] = (() => {
   return holes;
 })();
 
-/** hit = dropped into a hole; gutter = flew off the back; back = rolled back to the player. */
+/** hit = dropped into a hole; gutter = flew off the back; back = rolled back to the bumper. */
 export type RollKind = 'hit' | 'gutter' | 'back';
 
-export type RollEventType = 'lip' | 'skip' | 'rail' | 'bumper' | 'ball' | 'hit' | 'gutter' | 'back';
-
-export interface RollEvent {
-  /** Milliseconds after launch. */
-  t: number;
-  type: RollEventType;
-  /** Index into the simulation's bodies. */
-  ball: number;
-  x: number;
-  y: number;
-}
-
-/** A ball sitting on the table. */
-export interface BallAtRest {
-  id: number;
-  x: number;
-  y: number;
-}
+export type BallStatus = 'resting' | 'rolling' | 'held' | 'returning';
 
 export interface Launch {
-  /** Id of the ball being rolled – it must be one of the balls at rest. */
+  /** Id of the ball being rolled. */
   ball: number;
   /** Where the player let go of it (on the ramp). */
   x: number;
@@ -156,40 +139,52 @@ export interface Launch {
   vy: number;
 }
 
-export interface Capture {
-  /** Body index. */
+/** Everything about one ball, serialisable so a snapshot replays exactly. */
+export interface BallState {
+  id: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  status: BallStatus;
+  /** Settled against the bumper and not moving. */
+  frozen: boolean;
+  /** Touching the bumper. */
+  onBumper: boolean;
+  /** Holes (indices into HOLES) whose lip this ball is currently over. */
+  inside: number[];
+  /** Balls this one was dropped onto: no collision until they've come apart once. */
+  grace: number[];
+  /** Tick the ball comes back from the chute on (while returning). */
+  returnsAt: number;
+  /** Tick this roll started (while rolling / resting after a roll). */
+  launchTick: number;
+  /** Whether this roll made it past the ramp lip – otherwise it was just a drop. */
+  crossedLip: boolean;
+}
+
+export interface TableState {
+  tick: number;
+  balls: BallState[];
+}
+
+export type TableEventType = 'lip' | 'skip' | 'rail' | 'bumper' | 'ball' | 'hit' | 'gutter' | 'settle' | 'return' | 'launch';
+
+export interface TableEvent {
+  tick: number;
+  type: TableEventType;
   ball: number;
-  hole: Hole;
-  t: number;
+  x: number;
+  y: number;
+  /** Index into HOLES for hits. */
+  hole?: number;
+  /** For settles: whether the roll got past the lip (a real roll, not a drop). */
+  crossedLip?: boolean;
 }
 
-export interface RollOutcome {
-  /** What happened to the ball that was rolled. */
-  kind: RollKind;
-  /** Total points – a knocked ball that drops in counts too. */
-  points: number;
-  zone: Zone | null;
-  row: number | null;
-  col: number | null;
-  /** Milliseconds after launch when every ball had settled / dropped in / left the board. */
-  endedAt: number;
-  /** How far up the table the rolled ball got. Below the ramp lip it was just a drop, not a roll. */
-  peakY: number;
-}
-
-export interface RollSimulation {
-  outcome: RollOutcome;
-  /** Ids of the bodies, in frame order. */
-  ids: number[];
-  /** Index of the rolled ball among the bodies. */
-  launched: number;
-  /** Every stepMs, a centre per body: [x0, y0, x1, y1, …]; NaN once a body has dropped in. */
-  frames: number[];
-  events: RollEvent[];
-  captures: Capture[];
-  /** Where the surviving balls came to rest. */
-  final: BallAtRest[];
-}
+export const msToTick = (ms: number) => Math.floor(ms / PHYSICS.stepMs);
+export const tickToMs = (tick: number) => tick * PHYSICS.stepMs;
+export const CHUTE_DELAY_TICKS = Math.round(CHUTE_DELAY_MS / PHYSICS.stepMs);
 
 export function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
@@ -224,12 +219,81 @@ export function clampLaunch(vx: number, vy: number): { vx: number; vy: number } 
   return { vx: x, vy: y };
 }
 
+
+function newBall(id: number, x: number, y: number): BallState {
+  return { id, x, y, vx: 0, vy: 0, status: 'resting', frozen: true, onBumper: true, inside: [], grace: [], returnsAt: -1, launchTick: -1, crossedLip: false };
+}
+
+export function createTable(): TableState {
+  return { tick: 0, balls: BALL_START_XS.map((x, id) => newBall(id, x, BOARD.ballStartY)) };
+}
+
+export function cloneTable(t: TableState): TableState {
+  return { tick: t.tick, balls: t.balls.map((b) => ({ ...b, inside: [...b.inside], grace: [...b.grace] })) };
+}
+
+/** Two tables are the same if every ball matches to floating-point noise. */
+export function tablesMatch(a: TableState, b: TableState, eps = 1e-6): boolean {
+  if (a.tick !== b.tick || a.balls.length !== b.balls.length) return false;
+  for (let i = 0; i < a.balls.length; i++) {
+    const p = a.balls[i]!;
+    const q = b.balls[i]!;
+    if (p.id !== q.id || p.status !== q.status || p.frozen !== q.frozen) return false;
+    if (Math.abs(p.x - q.x) > eps || Math.abs(p.y - q.y) > eps || Math.abs(p.vx - q.vx) > eps || Math.abs(p.vy - q.vy) > eps) return false;
+  }
+  return true;
+}
+
+/** Lift a resting ball off the table: it stops taking part until it's rolled. */
+export function grabBall(t: TableState, ballId: number): boolean {
+  const b = t.balls.find((k) => k.id === ballId);
+  if (!b || b.status !== 'resting') return false;
+  b.status = 'held';
+  b.vx = 0;
+  b.vy = 0;
+  b.frozen = false;
+  return true;
+}
+
+/** Roll a ball (held, or resting – a grab is implied) from a point on the ramp. */
+export function launchBall(t: TableState, launch: Launch, events?: TableEvent[]): boolean {
+  const b = t.balls.find((k) => k.id === launch.ball);
+  if (!b || (b.status !== 'held' && b.status !== 'resting')) return false;
+  const pos = clampLaunchPosition(launch.x, launch.y);
+  const vel = clampLaunch(launch.vx, launch.vy);
+  b.x = pos.x;
+  b.y = pos.y;
+  b.vx = vel.vx;
+  b.vy = vel.vy;
+  b.status = 'rolling';
+  b.frozen = false;
+  b.onBumper = pos.y <= BOARD.ballStartY + 1e-6;
+  b.inside = [];
+  b.launchTick = t.tick;
+  b.crossedLip = false;
+  b.grace = t.balls
+    .filter((o) => o.id !== b.id && (o.status === 'resting' || o.status === 'rolling') && Math.hypot(o.x - pos.x, o.y - pos.y) < PHYSICS.ballRadius * 2)
+    .map((o) => o.id);
+  events?.push({ tick: t.tick, type: 'launch', ball: b.id, x: b.x, y: b.y });
+  return true;
+}
+
+/** First chute slot along the bumper that isn't blocked by a ball on the table. */
+export function freeSlot(t: TableState): number {
+  const gap = PHYSICS.ballRadius * 2 + 0.05;
+  for (const x of CHUTE_SLOTS) {
+    if (t.balls.every((b) => b.status === 'returning' || b.status === 'held' || Math.abs(b.x - x) >= gap || Math.abs(b.y - BOARD.ballStartY) > gap)) return x;
+  }
+  return 0;
+}
+
 /**
- * Roll one ball and follow every ball on the table until all have settled,
- * dropped in, or left the board. Balls at rest are real bodies: a returning
- * ball can knock them and they roll and settle in turn.
+ * Advance the table by one step. Every ball on the table takes part: balls
+ * at rest are real bodies, so a returning ball can knock them and they roll
+ * and settle in turn. Deterministic: fixed timestep, plain arithmetic and
+ * sqrt only, so a phone and the server compute the very same table.
  */
-export function simulateRoll(launch: Launch, atRest: BallAtRest[]): RollSimulation {
+export function stepTable(t: TableState, events: TableEvent[]): void {
   const {
     slope,
     friction,
@@ -244,235 +308,203 @@ export function simulateRoll(launch: Launch, atRest: BallAtRest[]): RollSimulati
     settleSpeed,
     ballRadius,
     stepMs,
-    maxDurationMs,
   } = PHYSICS;
   const dt = stepMs / 1000;
   const railX = BOARD.halfWidth - ballRadius;
-  const n = atRest.length;
-  const ids = atRest.map((b) => b.id);
-  const launched = Math.max(0, ids.indexOf(launch.ball));
-  const start = clampLaunchPosition(launch.x, launch.y);
-  const vel = clampLaunch(launch.vx, launch.vy);
+  t.tick += 1;
+  const tick = t.tick;
+  const balls = t.balls;
+  const onTable = (b: BallState) => b.status === 'resting' || b.status === 'rolling';
 
-  const x = atRest.map((b) => b.x);
-  const y = atRest.map((b) => b.y);
-  const vx = new Array<number>(n).fill(0);
-  const vy = new Array<number>(n).fill(0);
-  /** Settled against the bumper and not moving. */
-  const frozen = new Array<boolean>(n).fill(true);
-  /** Touching the bumper. */
-  const onBumper = new Array<boolean>(n).fill(true);
-  const alive = new Array<boolean>(n).fill(true);
-  const inside: Set<Hole>[] = atRest.map(() => new Set<Hole>());
+  // Integrate the moving bodies
+  for (const b of balls) {
+    if (!onTable(b) || b.frozen) continue;
+    let ax = 0;
+    let ay = -slope;
+    const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+    if (speed > 1e-6) {
+      ax -= (friction * b.vx) / speed;
+      ay -= (friction * b.vy) / speed;
+    }
+    b.vx += ax * dt;
+    b.vy += ay * dt;
+    if (b.onBumper && b.vy < 0) b.vy = 0;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
 
-  x[launched] = start.x;
-  y[launched] = start.y;
-  vx[launched] = vel.vx;
-  vy[launched] = vel.vy;
-  frozen[launched] = false;
-  onBumper[launched] = start.y <= BOARD.ballStartY + 1e-6;
+    // Side rails
+    if (b.x > railX) {
+      b.x = railX - (b.x - railX);
+      b.vx = -Math.abs(b.vx) * railRestitution;
+      events.push({ tick, type: 'rail', ball: b.id, x: b.x, y: b.y });
+    } else if (b.x < -railX) {
+      b.x = -railX + (-railX - b.x);
+      b.vx = Math.abs(b.vx) * railRestitution;
+      events.push({ tick, type: 'rail', ball: b.id, x: b.x, y: b.y });
+    }
 
-  /** Bodies the rolled ball was dropped onto: no collision until they've come apart once. */
-  const grace = new Set<number>();
-  for (let i = 0; i < n; i++) {
-    if (i === launched) continue;
-    const dx = x[i]! - start.x;
-    const dy = y[i]! - start.y;
-    if (Math.sqrt(dx * dx + dy * dy) < ballRadius * 2) grace.add(i);
+    if (b.y > BOARD.rampLength) b.crossedLip = true;
+
+    // Back gutter
+    if (b.y > BOARD.gutterY) {
+      events.push({ tick, type: 'gutter', ball: b.id, x: b.x, y: b.y });
+      b.status = 'returning';
+      b.returnsAt = tick + CHUTE_DELAY_TICKS;
+      b.vx = 0;
+      b.vy = 0;
+      continue;
+    }
+
+    // Front bumper: bounce back up the slope, a little less each time, then settle.
+    if (b.y < BOARD.ballStartY && b.vy < 0) {
+      b.y = BOARD.ballStartY;
+      if (-b.vy > settleSpeed) {
+        b.vy = -b.vy * bumperRestitution;
+        events.push({ tick, type: 'bumper', ball: b.id, x: b.x, y: b.y });
+      } else {
+        b.vy = 0;
+        b.onBumper = true;
+      }
+    } else if (b.y > BOARD.ballStartY + 0.02) {
+      b.onBumper = false;
+    }
+    if (b.onBumper && Math.abs(b.vx) < settleSpeed && Math.abs(b.vy) < 1e-6) {
+      b.vx = 0;
+      b.frozen = true;
+      if (b.status === 'rolling') {
+        b.status = 'resting';
+        events.push({ tick, type: 'settle', ball: b.id, x: b.x, y: b.y, crossedLip: b.crossedLip });
+      }
+    }
   }
 
-  let t = 0;
-  let peakY = start.y;
-  let launchedKind: RollKind | null = null;
-  const frames: number[] = [];
-  const events: RollEvent[] = [];
-  const captures: Capture[] = [];
-  const pushFrame = () => {
-    for (let i = 0; i < n; i++) frames.push(alive[i] ? x[i]! : NaN, alive[i] ? y[i]! : NaN);
-  };
-  pushFrame();
-
-  const finish = (): RollSimulation => {
-    const kind: RollKind = launchedKind ?? 'back';
-    const mine = captures.find((c) => c.ball === launched) ?? captures[0] ?? null;
-    events.push({ t, type: kind, ball: launched, x: x[launched]!, y: y[launched]! });
-    return {
-      outcome: {
-        kind,
-        points: captures.reduce((sum, c) => sum + c.hole.points, 0),
-        zone: mine?.hole.zone ?? null,
-        row: mine?.hole.row ?? null,
-        col: mine?.hole.col ?? null,
-        endedAt: t,
-        peakY,
-      },
-      ids,
-      launched,
-      frames,
-      events,
-      captures,
-      final: atRest.filter((_, i) => alive[i]).map((b, k) => {
-        const i = ids.indexOf(b.id);
-        void k;
-        return { id: b.id, x: x[i]!, y: y[i]! };
-      }),
-    };
-  };
-
-  while (t < maxDurationMs) {
-    t += stepMs;
-
-    // Integrate the moving bodies
-    for (let i = 0; i < n; i++) {
-      if (!alive[i] || frozen[i]) continue;
-      let ax = 0;
-      let ay = -slope;
-      const speed = Math.sqrt(vx[i]! * vx[i]! + vy[i]! * vy[i]!);
-      if (speed > 1e-6) {
-        ax -= (friction * vx[i]!) / speed;
-        ay -= (friction * vy[i]!) / speed;
-      }
-      vx[i] = vx[i]! + ax * dt;
-      vy[i] = vy[i]! + ay * dt;
-      if (onBumper[i] && vy[i]! < 0) vy[i] = 0;
-      x[i] = x[i]! + vx[i]! * dt;
-      y[i] = y[i]! + vy[i]! * dt;
-
-      // Side rails
-      if (x[i]! > railX) {
-        x[i] = railX - (x[i]! - railX);
-        vx[i] = -Math.abs(vx[i]!) * railRestitution;
-        events.push({ t, type: 'rail', ball: i, x: x[i]!, y: y[i]! });
-      } else if (x[i]! < -railX) {
-        x[i] = -railX + (-railX - x[i]!);
-        vx[i] = Math.abs(vx[i]!) * railRestitution;
-        events.push({ t, type: 'rail', ball: i, x: x[i]!, y: y[i]! });
-      }
-
-      // Back gutter
-      if (y[i]! > BOARD.gutterY) {
-        alive[i] = false;
-        if (i === launched) launchedKind = 'gutter';
-        events.push({ t, type: 'gutter', ball: i, x: x[i]!, y: y[i]! });
+  // Ball on ball: push apart, swap the approaching part of their velocities (equal masses).
+  for (let i = 0; i < balls.length; i++) {
+    const p = balls[i]!;
+    if (!onTable(p)) continue;
+    for (let j = i + 1; j < balls.length; j++) {
+      const q = balls[j]!;
+      if (!onTable(q)) continue;
+      const dx = q.x - p.x;
+      const dy = q.y - p.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const minD = ballRadius * 2;
+      const pg = p.grace.indexOf(q.id);
+      const qg = q.grace.indexOf(p.id);
+      if (pg >= 0 || qg >= 0) {
+        if (d >= minD) {
+          if (pg >= 0) p.grace.splice(pg, 1);
+          if (qg >= 0) q.grace.splice(qg, 1);
+        }
         continue;
       }
-
-      // Front bumper: bounce back up the slope, a little less each time, then settle.
-      if (y[i]! < BOARD.ballStartY && vy[i]! < 0) {
-        y[i] = BOARD.ballStartY;
-        if (-vy[i]! > settleSpeed) {
-          vy[i] = -vy[i]! * bumperRestitution;
-          events.push({ t, type: 'bumper', ball: i, x: x[i]!, y: y[i]! });
-        } else {
-          vy[i] = 0;
-          onBumper[i] = true;
-        }
-      } else if (y[i]! > BOARD.ballStartY + 0.02) {
-        onBumper[i] = false;
+      if (d >= minD) continue;
+      const nx = d > 1e-6 ? dx / d : 0;
+      const ny = d > 1e-6 ? dy / d : 1;
+      const push = (minD - d) / 2;
+      p.x -= nx * push;
+      p.y -= ny * push;
+      q.x += nx * push;
+      q.y += ny * push;
+      const vn = (q.vx - p.vx) * nx + (q.vy - p.vy) * ny;
+      if (vn < 0) {
+        const k = ((1 + ballRestitution) / 2) * vn;
+        p.vx += k * nx;
+        p.vy += k * ny;
+        q.vx -= k * nx;
+        q.vy -= k * ny;
+        events.push({ tick, type: 'ball', ball: q.id, x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 });
       }
-      if (onBumper[i] && Math.abs(vx[i]!) < settleSpeed && Math.abs(vy[i]!) < 1e-6) {
-        vx[i] = 0;
-        frozen[i] = true;
-      }
-      if (i === launched && y[i]! > peakY) peakY = y[i]!;
-    }
-
-    // Ball on ball: push apart, swap the approaching part of their velocities (equal masses).
-    for (let i = 0; i < n; i++) {
-      if (!alive[i]) continue;
-      for (let j = i + 1; j < n; j++) {
-        if (!alive[j]) continue;
-        const dx = x[j]! - x[i]!;
-        const dy = y[j]! - y[i]!;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        const minD = ballRadius * 2;
-        const other = i === launched ? j : j === launched ? i : -1;
-        if (other >= 0 && grace.has(other)) {
-          if (d >= minD) grace.delete(other);
-          continue;
-        }
-        if (d >= minD) continue;
-        const nx = d > 1e-6 ? dx / d : 0;
-        const ny = d > 1e-6 ? dy / d : 1;
-        const push = (minD - d) / 2;
-        x[i] = x[i]! - nx * push;
-        y[i] = y[i]! - ny * push;
-        x[j] = x[j]! + nx * push;
-        y[j] = y[j]! + ny * push;
-        const vn = (vx[j]! - vx[i]!) * nx + (vy[j]! - vy[i]!) * ny;
-        if (vn < 0) {
-          const k = ((1 + ballRestitution) / 2) * vn;
-          vx[i] = vx[i]! + k * nx;
-          vy[i] = vy[i]! + k * ny;
-          vx[j] = vx[j]! - k * nx;
-          vy[j] = vy[j]! - k * ny;
-          events.push({ t, type: 'ball', ball: j, x: (x[i]! + x[j]!) / 2, y: (y[i]! + y[j]!) / 2 });
-        }
-        frozen[i] = false;
-        frozen[j] = false;
-        if (y[i]! > BOARD.ballStartY + 0.02) onBumper[i] = false;
-        if (y[j]! > BOARD.ballStartY + 0.02) onBumper[j] = false;
-      }
-    }
-
-    // Holes
-    for (let i = 0; i < n; i++) {
-      if (!alive[i] || frozen[i]) continue;
-      for (const hole of HOLES) {
-        const dy = y[i]! - hole.y;
-        if (dy > captureRadius || dy < -captureRadius) {
-          inside[i]!.delete(hole);
-          continue;
-        }
-        const dx = x[i]! - hole.x;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d >= captureRadius) {
-          inside[i]!.delete(hole);
-          continue;
-        }
-        if (inside[i]!.has(hole)) continue;
-        inside[i]!.add(hole);
-
-        const v = Math.sqrt(vx[i]! * vx[i]! + vy[i]! * vy[i]!);
-        if (v > captureSpeed) {
-          // Too quick: the lip is just a bump on the way past.
-          vx[i] = vx[i]! * skipDamping;
-          vy[i] = vy[i]! * skipDamping;
-          events.push({ t, type: 'skip', ball: i, x: hole.x, y: hole.y });
-        } else if (v < lipSpeed) {
-          // Too slow to climb the lip: bounce off it and let the slope take over.
-          const nx = d > 1e-6 ? dx / d : 0;
-          const ny = d > 1e-6 ? dy / d : -1;
-          const vn = vx[i]! * nx + vy[i]! * ny;
-          if (vn < 0) {
-            vx[i] = vx[i]! - (1 + lipRestitution) * vn * nx;
-            vy[i] = vy[i]! - (1 + lipRestitution) * vn * ny;
+      for (const b of [p, q]) {
+        if (b.frozen) {
+          b.frozen = false;
+          if (b.status === 'resting') {
+            // Knocked: it's rolling again, but it isn't a fresh roll.
+            b.status = 'rolling';
           }
-          x[i] = hole.x + nx * captureRadius;
-          y[i] = hole.y + ny * captureRadius;
-          events.push({ t, type: 'lip', ball: i, x: hole.x, y: hole.y });
-        } else {
-          alive[i] = false;
-          captures.push({ ball: i, hole, t });
-          if (i === launched) launchedKind = 'hit';
-          events.push({ t, type: 'hit', ball: i, x: x[i]!, y: y[i]! });
-          break;
         }
+        if (b.y > BOARD.ballStartY + 0.02) b.onBumper = false;
       }
     }
-
-    pushFrame();
-
-    let settled = true;
-    for (let i = 0; i < n; i++) if (alive[i] && !frozen[i]) settled = false;
-    if (settled) return finish();
   }
-  return finish();
+
+  // Holes
+  for (const b of balls) {
+    if (!onTable(b) || b.frozen) continue;
+    for (let h = 0; h < HOLES.length; h++) {
+      const hole = HOLES[h]!;
+      const dy = b.y - hole.y;
+      if (dy > captureRadius || dy < -captureRadius) {
+        removeFrom(b.inside, h);
+        continue;
+      }
+      const dx = b.x - hole.x;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d >= captureRadius) {
+        removeFrom(b.inside, h);
+        continue;
+      }
+      if (b.inside.includes(h)) continue;
+      b.inside.push(h);
+
+      const v = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+      if (v > captureSpeed) {
+        // Too quick: the lip is just a bump on the way past.
+        b.vx *= skipDamping;
+        b.vy *= skipDamping;
+        events.push({ tick, type: 'skip', ball: b.id, x: hole.x, y: hole.y, hole: h });
+      } else if (v < lipSpeed) {
+        // Too slow to climb the lip: bounce off it and let the slope take over.
+        const nx = d > 1e-6 ? dx / d : 0;
+        const ny = d > 1e-6 ? dy / d : -1;
+        const vn = b.vx * nx + b.vy * ny;
+        if (vn < 0) {
+          b.vx -= (1 + lipRestitution) * vn * nx;
+          b.vy -= (1 + lipRestitution) * vn * ny;
+        }
+        b.x = hole.x + nx * captureRadius;
+        b.y = hole.y + ny * captureRadius;
+        events.push({ tick, type: 'lip', ball: b.id, x: hole.x, y: hole.y, hole: h });
+      } else {
+        events.push({ tick, type: 'hit', ball: b.id, x: b.x, y: b.y, hole: h });
+        b.status = 'returning';
+        b.returnsAt = tick + CHUTE_DELAY_TICKS;
+        b.vx = 0;
+        b.vy = 0;
+        break;
+      }
+    }
+  }
+
+  // Back from the chute
+  for (const b of balls) {
+    if (b.status !== 'returning' || tick < b.returnsAt) continue;
+    const x = freeSlot(t);
+    b.x = x;
+    b.y = BOARD.ballStartY;
+    b.vx = 0;
+    b.vy = 0;
+    b.status = 'resting';
+    b.frozen = true;
+    b.onBumper = true;
+    b.inside = [];
+    b.grace = [];
+    b.returnsAt = -1;
+    events.push({ tick, type: 'return', ball: b.id, x: b.x, y: b.y });
+  }
+}
+
+function removeFrom(list: number[], v: number): void {
+  const i = list.indexOf(v);
+  if (i >= 0) list.splice(i, 1);
+}
+
+/** True while any ball is rolling (or waiting in the chute). */
+export function tableBusy(t: TableState): boolean {
+  return t.balls.some((b) => b.status === 'rolling' || b.status === 'returning');
 }
 
 export type RacePhase = 'countdown' | 'racing' | 'finished';
-
-export type BallStatus = 'resting' | 'rolling' | 'returning';
 
 export interface BallView {
   id: number;
@@ -481,15 +513,12 @@ export interface BallView {
   status: BallStatus;
 }
 
-/** A roll in progress: everything needed to replay the same simulation. */
-export interface FlightRecord {
-  launch: Launch;
-  atRest: BallAtRest[];
-  /** Race clock (ms) at launch. */
-  launchedAt: number;
-}
-
-export interface RollRecord extends RollOutcome {
+export interface RollRecord {
+  kind: RollKind;
+  points: number;
+  zone: Zone | null;
+  row: number | null;
+  col: number | null;
   /** Per-player roll counter, starting at 1. */
   seq: number;
   /** Race clock (ms) when the outcome was applied. */
@@ -502,7 +531,6 @@ export interface RacerState {
   rolls: number;
   lastRoll: RollRecord | null;
   balls: BallView[];
-  flight: FlightRecord | null;
   finishedAt: number | null;
   /** 1-based rank while racing; final rank once finished. */
   rank: number;
@@ -533,20 +561,24 @@ export interface RollABallPlayerState {
   raceMs: number;
   trackLength: number;
   me: RacerState;
-  /** Milliseconds until the current roll has settled (0 = pick a ball and roll). */
-  cooldownMs: number;
+  /** The authoritative table, for the phone to check its prediction against. */
+  table: TableState;
   leaderProgress: number;
   playerCount: number;
   winnerId: string | null;
 }
 
-export type RollABallInput = { type: 'roll'; ball: number; x: number; y: number; vx: number; vy: number };
+export type RollABallInput =
+  | { type: 'grab'; ball: number; tick: number }
+  | { type: 'roll'; ball: number; x: number; y: number; vx: number; vy: number; tick: number };
 
 export function isRollInput(v: unknown): v is RollABallInput {
   if (!v || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
   const num = (k: string) => typeof o[k] === 'number' && Number.isFinite(o[k]);
-  return o.type === 'roll' && num('ball') && num('x') && num('y') && num('vx') && num('vy');
+  if (o.type === 'grab') return num('ball') && num('tick');
+  if (o.type === 'roll') return num('ball') && num('x') && num('y') && num('vx') && num('vy') && num('tick');
+  return false;
 }
 
 export function ordinal(n: number): string {

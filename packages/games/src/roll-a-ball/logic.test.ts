@@ -2,9 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BALLS_PER_PLAYER,
-  BALL_START_XS,
   BOARD,
-  CHUTE_DELAY_MS,
+  CHUTE_DELAY_TICKS,
   COUNTDOWN_MS,
   FINISH_LINGER_MS,
   HOLES,
@@ -13,12 +12,18 @@ import {
   TRACK_LENGTH,
   clampLaunch,
   clampLaunchPosition,
+  cloneTable,
+  createTable,
+  grabBall,
+  launchBall,
   ordinal,
-  simulateRoll,
-  type BallAtRest,
-  type Launch,
+  stepTable,
+  tableBusy,
+  tablesMatch,
+  type TableEvent,
+  type TableState,
 } from './logic';
-import { RollABallGame } from './server';
+import { MAX_REWIND_TICKS, RollABallGame } from './server';
 import type { PlayerInfo } from '@funfair/shared';
 
 function player(id: string): PlayerInfo {
@@ -40,9 +45,6 @@ function makeGame(ids: string[]) {
   return { game, advance };
 }
 
-/** The table at the start of a game. */
-const startTable = (): BallAtRest[] => BALL_START_XS.map((x, id) => ({ id, x, y: BOARD.ballStartY }));
-
 /** Launch velocity for a power (0..1) and a lateral fraction of the speed. */
 function velocity(power: number, lateral = 0) {
   const v = power * PHYSICS.maxLaunchSpeed;
@@ -50,13 +52,23 @@ function velocity(power: number, lateral = 0) {
   return { vx, vy: Math.sqrt(v * v - vx * vx) };
 }
 
-/** Roll the middle ball from the centre of the bumper. */
-function roll(power: number, lateral = 0, from: { x: number; y: number } = { x: 0, y: BOARD.ballStartY }) {
-  const launch: Launch = { ball: 1, ...from, ...velocity(power, lateral) };
-  return simulateRoll(launch, startTable());
+/** Step until nothing is rolling or waiting in the chute (or a tick budget runs out). */
+function run(table: TableState, events: TableEvent[], maxTicks = 2400) {
+  for (let i = 0; i < maxTicks && tableBusy(table); i++) stepTable(table, events);
 }
 
-const types = (events: { type: string; ball: number }[], ball?: number) => events.filter((e) => ball === undefined || e.ball === ball).map((e) => e.type);
+/** Roll the middle ball from a point (default: centre of the bumper) on a fresh table. */
+function roll(power: number, lateral = 0, from: { x: number; y: number } = { x: 0, y: BOARD.ballStartY }) {
+  const table = createTable();
+  const events: TableEvent[] = [];
+  launchBall(table, { ball: 1, ...from, ...velocity(power, lateral) }, events);
+  run(table, events);
+  return { table, events, ball: table.balls.find((b) => b.id === 1)! };
+}
+
+const types = (events: TableEvent[], ball?: number) => events.filter((e) => ball === undefined || e.ball === ball).map((e) => e.type);
+const hits = (events: TableEvent[], ball?: number) => events.filter((e) => e.type === 'hit' && (ball === undefined || e.ball === ball));
+const settleOf = (events: TableEvent[], ball: number) => events.find((e) => e.type === 'settle' && e.ball === ball);
 
 test('the pyramid has the right shape', () => {
   assert.equal(HOLES.length, (ROWS * (ROWS + 1)) / 2);
@@ -65,7 +77,7 @@ test('the pyramid has the right shape', () => {
   assert.equal(count('trot'), 7);
   assert.equal(count('walk'), 5);
   assert.ok(HOLES.every((h) => h.y > BOARD.rampLength && h.y < BOARD.gutterY));
-  assert.equal(BALL_START_XS.length, BALLS_PER_PLAYER);
+  assert.equal(createTable().balls.length, BALLS_PER_PLAYER);
 });
 
 test('launch clamps: speed, angle and release point', () => {
@@ -80,147 +92,190 @@ test('launch clamps: speed, angle and release point', () => {
   assert.deepEqual(clampLaunchPosition(NaN, -1), { x: 0, y: BOARD.ballStartY });
 });
 
-test('simulateRoll is deterministic', () => {
-  const a = roll(0.7, 0.2);
-  const b = roll(0.7, 0.2);
-  assert.deepEqual(a.outcome, b.outcome);
-  assert.deepEqual(a.frames, b.frames);
-  assert.deepEqual(a.events, b.events);
-  assert.deepEqual(a.final, b.final);
+test('the table is deterministic and snapshots replay exactly', () => {
+  const a = createTable();
+  const b = createTable();
+  launchBall(a, { ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.7, 0.2) });
+  launchBall(b, { ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.7, 0.2) });
+  const ea: TableEvent[] = [];
+  const eb: TableEvent[] = [];
+  for (let i = 0; i < 400; i++) {
+    stepTable(a, ea);
+    stepTable(b, eb);
+    assert.ok(tablesMatch(a, b, 0));
+  }
+  assert.deepEqual(ea, eb);
+  // A clone taken mid-flight continues identically.
+  const c = cloneTable(a);
+  for (let i = 0; i < 200; i++) {
+    stepTable(a, ea);
+    stepTable(c, eb);
+  }
+  assert.ok(tablesMatch(a, c, 0));
 });
 
 test('a roll that comes back bounces off the front bumper and settles where it lands', () => {
-  // Find a roll that gets onto the board and comes back without dropping in.
-  let sim = roll(0.6, 0.05);
+  let r = roll(0.6, 0.05);
   outer: for (let power = 0.55; power < 0.95; power += 0.02) {
     for (const lateral of [0, 0.05, 0.1, 0.15, 0.2]) {
-      sim = roll(power, lateral);
-      if (sim.outcome.kind === 'back' && sim.outcome.peakY > BOARD.rampLength) break outer;
+      r = roll(power, lateral);
+      const s = settleOf(r.events, 1);
+      if (s?.crossedLip && hits(r.events).length === 0) break outer;
     }
   }
-  assert.equal(sim.outcome.kind, 'back');
-  assert.equal(sim.outcome.points, 0);
-  assert.ok(sim.outcome.peakY > BOARD.rampLength, 'it got onto the board');
-  const bumps = sim.events.filter((e) => e.type === 'bumper' && e.ball === sim.launched);
+  const settle = settleOf(r.events, 1);
+  assert.ok(settle?.crossedLip, 'the roll got onto the board and came back');
+  const bumps = r.events.filter((e) => e.type === 'bumper' && e.ball === 1);
   assert.ok(bumps.length >= 2, `expected bumper bounces, got ${bumps.length}`);
-  assert.equal(sim.final.length, 3, 'all three balls still on the table');
-  const me = sim.final.find((b) => b.id === 1)!;
-  assert.ok(Math.abs(me.y - BOARD.ballStartY) < 1e-6, 'came to rest on the bumper');
-  assert.ok(Math.abs(me.x) > 0.2, `drifted sideways to ${me.x}, not re-centred`);
-  // Nobody overlaps at rest.
-  for (const p of sim.final) for (const q of sim.final) if (p.id < q.id) assert.ok(Math.hypot(p.x - q.x, p.y - q.y) >= PHYSICS.ballRadius * 2 - 1e-3);
+  assert.equal(r.ball.status, 'resting');
+  assert.ok(Math.abs(r.ball.y - BOARD.ballStartY) < 1e-6, 'came to rest on the bumper');
+  assert.ok(Math.abs(r.ball.x) > 0.2, `drifted sideways to ${r.ball.x}, not re-centred`);
+  for (const p of r.table.balls) for (const q of r.table.balls) if (p.id < q.id) assert.ok(Math.hypot(p.x - q.x, p.y - q.y) >= PHYSICS.ballRadius * 2 - 1e-3);
 });
 
 test('letting go on the ramp is a drop, not a roll', () => {
-  const sim = simulateRoll({ ball: 1, x: 0.3, y: 2.5, vx: 0, vy: 0 }, startTable());
-  assert.equal(sim.outcome.kind, 'back');
-  assert.ok(sim.outcome.peakY < BOARD.rampLength);
-  assert.ok(sim.outcome.endedAt > 0);
+  const r = roll(0, 0, { x: 0.3, y: 2.5 });
+  const settle = settleOf(r.events, 1);
+  assert.ok(settle, 'it settled');
+  assert.equal(settle!.crossedLip, false);
+  assert.equal(r.ball.status, 'resting');
 });
 
-test('the right speed drops into the front row; the lip rejects a crawl; too fast skips', () => {
-  const walk = roll(0.55);
-  assert.equal(walk.outcome.kind, 'hit');
-  assert.equal(walk.outcome.zone, 'walk');
-  assert.equal(walk.outcome.row, 0);
-  assert.equal(walk.outcome.col, 2);
-  assert.ok(!types(walk.events, walk.launched).includes('skip'));
-  assert.equal(walk.final.length, 2, 'the rolled ball is off the table');
+test('the right speed drops into the front row and the ball comes back through the chute', () => {
+  const table = createTable();
+  const events: TableEvent[] = [];
+  launchBall(table, { ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.55) }, events);
+  for (let i = 0; i < 2400 && !hits(events).length; i++) stepTable(table, events);
+  const hit = hits(events, 1)[0]!;
+  const hole = HOLES[hit.hole!]!;
+  assert.equal(hole.zone, 'walk');
+  assert.equal(hole.row, 0);
+  assert.equal(hole.col, 2);
+  assert.ok(!types(events, 1).includes('skip'));
+  const ball = table.balls.find((b) => b.id === 1)!;
+  assert.equal(ball.status, 'returning');
+  assert.equal(ball.returnsAt, hit.tick + CHUTE_DELAY_TICKS);
+  run(table, events);
+  const back = events.find((e) => e.type === 'return' && e.ball === 1)!;
+  assert.equal(back.tick, hit.tick + CHUTE_DELAY_TICKS);
+  assert.equal(ball.status, 'resting');
+  assert.equal(ball.y, BOARD.ballStartY);
+  for (const o of table.balls) if (o.id !== 1) assert.ok(Math.abs(o.x - ball.x) >= PHYSICS.ballRadius * 2);
+});
 
+test('the lip rejects a crawl; too fast skips', () => {
   let lipped = 0;
   for (let power = 0.4; power < 0.75; power += 0.01) {
     for (const lateral of [0, 0.1, 0.2]) {
-      const sim = roll(power, lateral);
-      if (types(sim.events, sim.launched).includes('lip') && sim.outcome.kind === 'back') lipped++;
+      const r = roll(power, lateral);
+      if (types(r.events, 1).includes('lip') && settleOf(r.events, 1)) lipped++;
     }
   }
   assert.ok(lipped > 0, 'no roll bounced off a lip');
-
   const quick = roll(0.65);
-  assert.ok(types(quick.events, quick.launched).includes('skip'), 'ball should skip the first hole');
-  assert.equal(quick.outcome.kind, 'hit');
+  assert.ok(types(quick.events, 1).includes('skip'), 'ball should skip the first hole');
+  assert.equal(hits(quick.events, 1).length, 1);
 });
 
 test('a hard straight roll reaches the gallop triangle; a wide one bounces off the rail', () => {
   const gallop = roll(0.8);
-  assert.equal(gallop.outcome.zone, 'gallop');
-  assert.equal(gallop.outcome.points, 3);
-  assert.equal(gallop.outcome.row, ROWS - 1, 'a straight roll at this power reaches the apex');
-  assert.equal(roll(1).outcome.kind, 'gutter');
-
+  const hole = HOLES[hits(gallop.events, 1)[0]!.hole!]!;
+  assert.equal(hole.zone, 'gallop');
+  assert.equal(hole.row, ROWS - 1, 'a straight roll at this power reaches the apex');
+  assert.ok(types(roll(1).events, 1).includes('gutter'));
   const bank = roll(0.75, 0.4);
-  assert.ok(types(bank.events, bank.launched).includes('rail'));
-  const xs = bank.frames.filter((_, i) => i % 6 === bank.launched * 2).filter((v) => !Number.isNaN(v));
-  assert.ok(xs.every((x) => Math.abs(x) <= BOARD.halfWidth - PHYSICS.ballRadius + 1e-6));
+  assert.ok(types(bank.events, 1).includes('rail'));
 });
 
 test('a returning ball knocks a resting one, and both settle apart', () => {
-  const table: BallAtRest[] = [
-    { id: 0, x: 0.45, y: BOARD.ballStartY },
-    { id: 1, x: 0, y: BOARD.ballStartY },
-  ];
-  const sim = simulateRoll({ ball: 1, x: 0, y: 2.0, vx: 0.8, vy: 0 }, table);
-  assert.ok(types(sim.events).includes('ball'), 'expected a ball-on-ball collision');
-  assert.equal(sim.final.length, 2);
-  const [p, q] = sim.final;
+  const table = createTable();
+  table.balls[0]!.x = 0.45;
+  const events: TableEvent[] = [];
+  launchBall(table, { ball: 1, x: 0, y: 2.0, vx: 0.8, vy: 0 }, events);
+  run(table, events);
+  assert.ok(types(events).includes('ball'), 'expected a ball-on-ball collision');
+  const [p, q] = table.balls;
   assert.ok(Math.hypot(p!.x - q!.x, p!.y - q!.y) >= PHYSICS.ballRadius * 2 - 1e-3);
-  assert.notEqual(q!.x, 0.45, 'the resting ball was moved');
+  assert.notEqual(p!.x, 0.45, 'the resting ball was moved');
+  assert.ok(table.balls.every((b) => b.status === 'resting'));
+});
+
+test('two balls can be in flight at once', () => {
+  const table = createTable();
+  const events: TableEvent[] = [];
+  launchBall(table, { ball: 0, x: -1.2, y: BOARD.ballStartY, ...velocity(0.55) }, events);
+  for (let i = 0; i < 12; i++) stepTable(table, events);
+  launchBall(table, { ball: 2, x: 1.2, y: BOARD.ballStartY, ...velocity(0.6, -0.05) }, events);
+  assert.equal(table.balls.filter((b) => b.status === 'rolling').length, 2);
+  run(table, events);
+  for (const id of [0, 2]) assert.ok(hits(events, id).length + (settleOf(events, id) ? 1 : 0) >= 1, `ball ${id} finished its roll`);
+});
+
+test('a held ball takes no part in the physics', () => {
+  const table = createTable();
+  assert.ok(grabBall(table, 1));
+  assert.equal(table.balls[1]!.status, 'held');
+  assert.ok(!grabBall(table, 1));
+  const events: TableEvent[] = [];
+  launchBall(table, { ball: 0, x: 0, y: 2.0, vx: 0, vy: 0 }, events); // drops back through where ball 1 sits
+  run(table, events);
+  assert.ok(!types(events).includes('ball'));
+  assert.ok(launchBall(table, { ball: 1, x: 0, y: 1, vx: 0, vy: 0 }));
 });
 
 test('ordinal', () => {
   assert.deepEqual([1, 2, 3, 4, 11, 12, 13, 21, 22].map(ordinal), ['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd']);
 });
 
-test('one roll at a time; points land when the table settles; the ball comes back through the chute', () => {
+test('rolls score when they land; balls can be rolled back to back', () => {
   const { game, advance } = makeGame(['a', 'b']);
-  const input = { type: 'roll' as const, ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.55) };
-  game.onInput('a', input);
-  assert.equal(game.playerState('a').me.flight, null, 'no rolling during the countdown');
+  const tick = () => game.playerState('a').table.tick;
+  game.onInput('a', { type: 'roll', ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.55), tick: 0 });
+  assert.equal(game.playerState('a').table.balls[1]!.status, 'resting', 'no rolling during the countdown');
 
   advance(COUNTDOWN_MS);
   assert.equal(game.hostState().phase, 'racing');
-  assert.equal(game.playerState('a').me.balls.length, BALLS_PER_PLAYER);
-
-  const sim = simulateRoll({ ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.55) }, startTable());
-  game.onInput('a', input);
-  game.onInput('a', { ...input, ball: 0, ...velocity(0.8) });
+  game.onInput('a', { type: 'grab', ball: 1, tick: tick() });
+  assert.equal(game.playerState('a').table.balls[1]!.status, 'held');
+  game.onInput('a', { type: 'roll', ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.55), tick: tick() });
+  game.onInput('a', { type: 'roll', ball: 0, x: -1.2, y: BOARD.ballStartY, ...velocity(0.55), tick: tick() });
   let s = game.playerState('a');
-  assert.ok(s.me.flight, 'roll is in progress');
-  assert.equal(s.me.flight!.launch.ball, 1, 'second roll ignored while the table is live');
-  assert.equal(s.me.balls.find((b) => b.id === 1)!.status, 'rolling');
-  assert.equal(s.me.progress, 0, 'no points until it drops in');
-  assert.ok(s.cooldownMs > 0);
+  assert.equal(s.table.balls.filter((b) => b.status === 'rolling').length, 2, 'both balls rolling at once');
+  assert.equal(s.me.progress, 0, 'no points until something drops in');
 
-  advance(sim.outcome.endedAt + 50);
+  advance(1500);
   s = game.playerState('a');
-  assert.equal(s.me.progress, 1);
-  assert.equal(s.me.rolls, 1);
-  assert.equal(s.me.lastRoll?.zone, 'walk');
-  assert.equal(s.me.flight, null);
-  assert.equal(s.cooldownMs, 0);
-  assert.equal(s.me.balls.find((b) => b.id === 1)!.status, 'returning');
-  assert.equal(s.me.balls.filter((b) => b.status === 'resting').length, 2);
+  assert.ok(s.me.progress >= 1, `scored ${s.me.progress}`);
+  assert.ok(s.me.rolls >= 1);
+  assert.equal(s.me.lastRoll?.kind, 'hit');
+  assert.equal(game.playerState('b').leaderProgress, s.me.progress);
+});
 
-  advance(CHUTE_DELAY_MS + 100);
-  s = game.playerState('a');
-  const back = s.me.balls.find((b) => b.id === 1)!;
-  assert.equal(back.status, 'resting');
-  assert.equal(back.y, BOARD.ballStartY);
-  for (const other of s.me.balls) if (other.id !== 1) assert.ok(Math.abs(other.x - back.x) >= PHYSICS.ballRadius * 2);
-  assert.equal(game.playerState('b').leaderProgress, 1);
+test('a late input is applied at the tick it happened', () => {
+  const { game, advance } = makeGame(['a']);
+  advance(COUNTDOWN_MS + 500);
+  const now = game.playerState('a').table.tick;
+  const late = now - 12;
+  game.onInput('a', { type: 'roll', ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.55), tick: late });
+  // Reference: the same roll started at `late`, stepped up to `now`.
+  const ref = createTable();
+  ref.tick = late;
+  launchBall(ref, { ball: 1, x: 0, y: BOARD.ballStartY, ...velocity(0.55) });
+  const ev: TableEvent[] = [];
+  while (ref.tick < now) stepTable(ref, ev);
+  assert.ok(tablesMatch(game.playerState('a').table, ref, 0), 'server rewound and replayed the roll');
+  assert.ok(MAX_REWIND_TICKS >= 12);
 });
 
 test('a drop moves the ball but is not a roll', () => {
   const { game, advance } = makeGame(['a']);
   advance(COUNTDOWN_MS);
-  game.onInput('a', { type: 'roll', ball: 0, x: -2.0, y: 1.5, vx: 0, vy: 0 });
-  assert.ok(game.playerState('a').me.flight);
+  game.onInput('a', { type: 'roll', ball: 0, x: -2.0, y: 1.5, vx: 0, vy: 0, tick: game.playerState('a').table.tick });
   advance(4000);
   const s = game.playerState('a');
-  assert.equal(s.me.flight, null);
   assert.equal(s.me.rolls, 0);
   assert.equal(game.hostState().feed.length, 0);
-  const b = s.me.balls.find((k) => k.id === 0)!;
+  const b = s.table.balls[0]!;
   assert.equal(b.status, 'resting');
   assert.ok(Math.abs(b.x - -2.0) < 0.3, `settled near where it was dropped, at ${b.x}`);
 });
@@ -229,17 +284,17 @@ test('first racer to the line wins, then the game finishes after the linger', ()
   const { game, advance } = makeGame(['a', 'b']);
   advance(COUNTDOWN_MS);
   const rollAny = (id: string, power: number) => {
-    const ball = game.playerState(id).me.balls.find((b) => b.status === 'resting');
-    if (ball) game.onInput(id, { type: 'roll', ball: ball.id, x: 0, y: BOARD.ballStartY, ...velocity(power) });
+    const s = game.playerState(id);
+    const ball = s.table.balls.find((b) => b.status === 'resting');
+    if (ball) game.onInput(id, { type: 'roll', ball: ball.id, x: 0, y: BOARD.ballStartY, ...velocity(power), tick: s.table.tick });
   };
-  let rolls = 0;
-  while (game.hostState().phase !== 'finished' && rolls < 40) {
+  let rounds = 0;
+  while (game.hostState().phase !== 'finished' && rounds < 60) {
     rollAny('a', 0.8);
     rollAny('b', 0.55);
-    advance(3500);
-    rolls++;
+    advance(1200);
+    rounds++;
   }
-  assert.equal(rolls, TRACK_LENGTH / 3);
   const host = game.hostState();
   assert.equal(host.phase, 'finished');
   assert.equal(host.winnerId, 'a');
@@ -260,8 +315,8 @@ test('malformed input is rejected', () => {
   game.onInput('a', { type: 'roll', vx: 'lots' });
   // @ts-expect-error deliberately malformed
   game.onInput('a', null);
-  game.onInput('a', { type: 'roll', ball: 7, x: 0, y: 0.3, vx: 0, vy: 5 });
-  game.onInput('nobody', { type: 'roll', ball: 0, x: 0, y: 0.3, vx: 0, vy: 5 });
-  assert.equal(game.playerState('a').me.flight, null);
+  game.onInput('a', { type: 'roll', ball: 7, x: 0, y: 0.3, vx: 0, vy: 5, tick: 0 });
+  game.onInput('nobody', { type: 'roll', ball: 0, x: 0, y: 0.3, vx: 0, vy: 5, tick: 0 });
+  assert.ok(game.playerState('a').table.balls.every((b) => b.status === 'resting'));
   assert.equal(game.playerState('a').me.rolls, 0);
 });
