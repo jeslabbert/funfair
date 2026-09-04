@@ -22,33 +22,32 @@ export const ZONE_LABEL: Record<Zone, string> = { walk: 'Walk', trot: 'Trot', ga
  * The board is a pyramid of holes, ROWS deep: the front row (nearest the ramp)
  * has ROWS holes, each row back has one fewer, and the apex has one.
  *
- *            G            back  – gallop: the apex triangle
- *          G   G
- *        G   G   G
- *      T   T   T   T      middle – trot: an arrow/chevron under the triangle…
- *    T   W   W   W   T    …whose arms run down the outside edges
- *  T   W   W   W   W   T
- *T   W   W   W   W   W   T front – walk: everything inside the arrow
+ *          G          back  – gallop: the apex triangle
+ *        G   G
+ *      T   T   T      middle – trot: an arrow/chevron under the triangle…
+ *    T   W   W   T    …whose arms run down the outside edges
+ *  T   W   W   W   T  front – walk: everything inside the arrow
  */
-export const ROWS = 7;
+export const ROWS = 5;
 /** Rows (from the front, 0-based) that belong to the gallop triangle. */
-export const GALLOP_FROM_ROW = 4;
+export const GALLOP_FROM_ROW = 3;
 /** The full row that forms the tip of the trot arrow. */
-export const TROT_ROW = 3;
+export const TROT_ROW = 2;
 
 /**
- * Board geometry in "board units": 1 unit = the spacing between neighbouring
- * holes. y runs up the slope from the bottom of the ramp.
+ * Board geometry in "board units": 1 unit = the lateral spacing between
+ * neighbouring holes. y runs up the slope from the bottom of the ramp.
  */
 export const BOARD = {
   /** Side rails sit at ±halfWidth. */
-  halfWidth: 3.6,
+  halfWidth: 3.0,
   /** The ramp meets the board at this y. */
-  rampLength: 2.0,
-  firstRowY: 2.6,
-  rowSpacing: 1.0,
+  rampLength: 3.0,
+  firstRowY: 3.6,
+  /** Rows are further apart than holes within a row: it's a long roll up. */
+  rowSpacing: 1.5,
   /** Past this the ball drops into the back gutter. */
-  gutterY: 9.4,
+  gutterY: 10.4,
   /** Where a ball sits in the player's hand. */
   ballStartY: 0.3,
 } as const;
@@ -59,18 +58,18 @@ export const PHYSICS = {
   /** Rolling resistance, always against motion (units/s²). */
   friction: 0.6,
   /** A ball whose centre passes within this of a hole centre meets its lip. */
-  captureRadius: 0.42,
+  captureRadius: 0.45,
   /** Slower than this and the ball can't climb the lip – it bounces back. */
   lipSpeed: 1.2,
   /** Faster than this and the ball skips straight over the hole. */
   captureSpeed: 4.0,
   /** Speed kept after skipping a hole (the lip is a bump). */
-  skipDamping: 0.85,
+  skipDamping: 0.9,
   lipRestitution: 0.35,
   railRestitution: 0.55,
   ballRadius: 0.3,
   /** Launch speed at full power. */
-  maxLaunchSpeed: 12,
+  maxLaunchSpeed: 15,
   /** Sideways component of the launch may not exceed this fraction of the speed (~37°). */
   maxLateralRatio: 0.6,
   stepMs: 1000 / 120,

@@ -47,9 +47,9 @@ const types = (events: { type: string }[]) => events.map((e) => e.type);
 test('the pyramid has the right shape', () => {
   assert.equal(HOLES.length, (ROWS * (ROWS + 1)) / 2);
   const count = (z: string) => HOLES.filter((h) => h.zone === z).length;
-  assert.equal(count('gallop'), 6);
-  assert.equal(count('trot'), 10);
-  assert.equal(count('walk'), 12);
+  assert.equal(count('gallop'), 3);
+  assert.equal(count('trot'), 7);
+  assert.equal(count('walk'), 5);
   assert.ok(HOLES.every((h) => h.y > BOARD.rampLength && h.y < BOARD.gutterY));
 });
 
@@ -82,15 +82,22 @@ test('a gentle roll comes back down the ramp', () => {
 });
 
 test('the right speed drops into the front row; the lip rejects a crawl; too fast skips', () => {
-  const walk = simulateRoll(launch(0.5).vx, launch(0.5).vy);
+  const walk = simulateRoll(launch(0.45).vx, launch(0.45).vy);
   assert.equal(walk.outcome.kind, 'hit');
   assert.equal(walk.outcome.zone, 'walk');
   assert.equal(walk.outcome.row, 0);
-  assert.equal(walk.outcome.col, 3);
+  assert.equal(walk.outcome.col, 2);
+  assert.ok(!types(walk.events).includes('skip'));
 
-  const crawl = simulateRoll(launch(0.5, 0.15).vx, launch(0.5, 0.15).vy);
-  assert.ok(types(crawl.events).includes('lip'), 'ball should bounce off a lip');
-  assert.equal(crawl.outcome.kind, 'back');
+  // Somewhere in the low-power range a ball creeps up to a lip, fails to climb it, and comes back.
+  let lipped = 0;
+  for (let power = 0.3; power < 0.6; power += 0.01) {
+    for (const lateral of [0, 0.1, 0.2]) {
+      const sim = simulateRoll(launch(power, lateral).vx, launch(power, lateral).vy);
+      if (types(sim.events).includes('lip') && sim.outcome.kind === 'back') lipped++;
+    }
+  }
+  assert.ok(lipped > 0, 'no roll bounced off a lip');
 
   const quick = simulateRoll(launch(0.55).vx, launch(0.55).vy);
   assert.ok(types(quick.events).includes('skip'), 'ball should skip the first hole');
@@ -98,9 +105,11 @@ test('the right speed drops into the front row; the lip rejects a crawl; too fas
 });
 
 test('a hard straight roll reaches the gallop triangle; a wide one bounces off the rail', () => {
-  const gallop = simulateRoll(launch(0.9).vx, launch(0.9).vy);
+  const gallop = simulateRoll(launch(0.85).vx, launch(0.85).vy);
   assert.equal(gallop.outcome.zone, 'gallop');
   assert.equal(gallop.outcome.points, 3);
+  assert.equal(gallop.outcome.row, ROWS - 1, 'a straight roll at this power reaches the apex');
+  assert.equal(simulateRoll(0, PHYSICS.maxLaunchSpeed).outcome.kind, 'gutter');
 
   const bank = simulateRoll(launch(0.75, 0.4).vx, launch(0.75, 0.4).vy);
   assert.ok(types(bank.events).includes('rail'));
@@ -119,12 +128,12 @@ test('one ball at a time; points land when the ball does', () => {
   advance(COUNTDOWN_MS);
   assert.equal(game.hostState().phase, 'racing');
 
-  const sim = simulateRoll(launch(0.5).vx, launch(0.5).vy);
-  game.onInput('a', { type: 'roll', ...launch(0.5) });
-  game.onInput('a', { type: 'roll', ...launch(0.9) });
+  const sim = simulateRoll(launch(0.45).vx, launch(0.45).vy);
+  game.onInput('a', { type: 'roll', ...launch(0.45) });
+  game.onInput('a', { type: 'roll', ...launch(0.85) });
   let s = game.playerState('a');
   assert.ok(s.me.ball, 'ball is in play');
-  assert.ok(Math.abs(s.me.ball!.vy - launch(0.5).vy) < 1e-9, 'second roll ignored while the first is in play');
+  assert.ok(Math.abs(s.me.ball!.vy - launch(0.45).vy) < 1e-9, 'second roll ignored while the first is in play');
   assert.equal(s.me.progress, 0, 'no points until it drops in');
   assert.ok(s.cooldownMs > 0);
 
@@ -147,9 +156,9 @@ test('first racer to the line wins, then the game finishes after the linger', ()
   advance(COUNTDOWN_MS);
   let rolls = 0;
   while (game.hostState().phase !== 'finished' && rolls < 40) {
-    game.onInput('a', { type: 'roll', ...launch(0.9) });
-    game.onInput('b', { type: 'roll', ...launch(0.5) });
-    advance(2500);
+    game.onInput('a', { type: 'roll', ...launch(0.85) });
+    game.onInput('b', { type: 'roll', ...launch(0.45) });
+    advance(3000);
     rolls++;
   }
   assert.equal(rolls, TRACK_LENGTH / 3);

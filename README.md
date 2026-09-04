@@ -97,9 +97,11 @@ can be unit-tested with `node:test` (`pnpm test`).
 
 ## Roll-a-Ball Derby
 
-- Phones show a top-down ramp leading onto a **pyramid of holes** (7 rows, 28 holes), the
-  classic Kentucky Derby board:
-  - **Back triangle = gallop (+3)** – the six holes at the apex.
+- Phones show a top-down ramp leading onto a **pyramid of holes** (5 rows, 15 holes), the
+  classic Kentucky Derby board. Rows sit further apart than holes within a row, so it's a
+  long roll up, and the pyramid's stagger means a dead-straight roll threads between the
+  holes of every other row – aim matters.
+  - **Back triangle = gallop (+3)** – the three holes at the apex.
   - **Middle arrow = trot (+2)** – the full row under the triangle plus the outside edges
     of the front rows, forming a chevron.
   - **Front = walk (+1)** – everything inside the arrow.
@@ -123,8 +125,9 @@ can be unit-tested with `node:test` (`pnpm test`).
 - Tuning knobs, all in `logic.ts`: `BOARD` (geometry), `PHYSICS` (`slope`, `friction`,
   `lipSpeed`, `captureSpeed`, `skipDamping`, rail/lip restitution, `maxLaunchSpeed`, launch
   angle limit), zone layout (`ROWS`, `GALLOP_FROM_ROW`, `TROT_ROW`, `ZONE_POINTS`) and
-  `TRACK_LENGTH`. Gesture feel (`POWER_SCALE`) sits at the top of `controller.ts`. Expect to
-  tweak `POWER_SCALE`, `lipSpeed` and `captureSpeed` after a round on real phones.
+  `TRACK_LENGTH`. Gesture feel sits at the top of `controller.ts`: power is half snap speed
+  (`POWER_SCALE`) and half swipe length (`DISTANCE_SCALE`). Expect to tweak those two,
+  `lipSpeed` and `captureSpeed` after a round on real phones.
 
 ## Roadmap
 

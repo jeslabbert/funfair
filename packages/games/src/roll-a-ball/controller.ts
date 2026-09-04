@@ -21,8 +21,10 @@ import {
 
 export const ZONE_COLORS: Record<Zone, string> = { walk: '#5ce07a', trot: '#ffb547', gallop: '#ff5c5c' };
 
-/** Flick speed (canvas heights per second) that counts as full power. */
+/** Flick speed (canvas heights per second) that counts as a full-power snap. */
 const POWER_SCALE = 8;
+/** Swipe length, as a fraction of the canvas height, that counts as a full-power pull. */
+const DISTANCE_SCALE = 0.75;
 const MIN_FLICK_PX = 24;
 const VELOCITY_WINDOW_MS = 120;
 const POPUP_MS = 900;
@@ -249,7 +251,7 @@ export function mountRollABallController(
     for (const h of HOLES) {
       const { x, y } = toCanvas(h.x, h.y);
       const u = unitAt(y);
-      const r = u * 0.36;
+      const r = u * 0.4;
       // Raised lip: a soft light ring outside the rim
       ctx.beginPath();
       ctx.arc(x, y, r + u * 0.1, 0, Math.PI * 2);
@@ -469,8 +471,8 @@ function eventLabel(ev: RollEvent): { text: string; color: string } | null {
 }
 
 /**
- * Turn a pointer trace into a launch: power (0..1) from the flick speed and a
- * unit direction from the drag, or null if it wasn't a flick.
+ * Turn a pointer trace into a launch: power (0..1) from the flick's snap speed
+ * and its length, plus a unit direction from the drag; null if it wasn't a flick.
  */
 export function readFlick(samples: Sample[], canvasHeight: number): { power: number; dirX: number; dirY: number } | null {
   if (samples.length < 2 || canvasHeight <= 0) return null;
@@ -491,7 +493,8 @@ export function readFlick(samples: Sample[], canvasHeight: number): { power: num
   const dt = Math.max(16, last.t - ref.t);
   const dy = Math.max(0, ref.y - last.y);
   const speed = dy / canvasHeight / (dt / 1000); // canvas heights per second
-  const power = clamp(speed / POWER_SCALE, 0, 1);
+  // Half from how hard you snap, half from how far you pull: a long swipe is a hard roll.
+  const power = clamp(0.5 * (speed / POWER_SCALE) + 0.5 * (totalDy / canvasHeight / DISTANCE_SCALE), 0, 1);
 
   const dx = last.x - first.x;
   const len = Math.sqrt(dx * dx + totalDy * totalDy);
