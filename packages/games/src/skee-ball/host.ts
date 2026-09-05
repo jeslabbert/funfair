@@ -2,7 +2,7 @@ import type { PlayerInfo } from '@funfair/shared';
 import type { HostView } from '@funfair/shared/client';
 import { BALLS_PER_PLAYER, LANE, RINGS, ordinal, type FeedEntry, type RacerState, type SkeeBallHostState } from './logic';
 import { pointColor } from './controller';
-import { escapeHtml, fitFont, hexToRgba, shade } from '../render/util';
+import { escapeHtml, fitFont, hexToRgba } from '../render/util';
 
 interface Card {
   el: HTMLElement;
@@ -24,7 +24,7 @@ export function mountSkeeBallHost(root: HTMLElement): HostView<SkeeBallHostState
       <aside class="skb-side">
         <h2>Skee-Ball Alley</h2>
         <div class="skb-clock">1:00</div>
-        <p class="skb-side-hint">Nine balls each. Roll up the lane, over the jump and into the rings: 10 anywhere, 20–50 in the rings, 100 in the corner pockets. Too hard and the ball hops. Highest total wins.</p>
+        <p class="skb-side-hint">Nine balls each. Roll up the lane, over the jump and onto the board. The ball bounces, rolls back down the slope and rattles in the cups: 20–50 in the rings, 100 in the corner pockets, 10 for the trough. Highest total wins.</p>
         <ol class="skb-feed"></ol>
       </aside>
     </div>`;
@@ -110,21 +110,19 @@ export function mountSkeeBallHost(root: HTMLElement): HostView<SkeeBallHostState
     ctx.beginPath();
     ctx.roundRect(X(-LANE.boardHalfWidth), U(LANE.boardLength), LANE.boardHalfWidth * 2 * scale, LANE.boardLength * scale, 6);
     ctx.fill();
-    // Rings
-    for (let i = RINGS.length - 1; i >= 0; i--) {
-      const ring = RINGS[i]!;
+    // Cups: a coloured lip around a dark opening
+    const cup = (x: number, u: number, r: number, points: number) => {
       ctx.beginPath();
-      ctx.arc(X(0), U(LANE.ringU), ring.r * scale, 0, Math.PI * 2);
-      ctx.fillStyle = shade(pointColor(ring.points), i % 2 === 0 ? -0.15 : -0.35);
+      ctx.arc(X(x), U(u), r * scale, 0, Math.PI * 2);
+      ctx.fillStyle = pointColor(points);
       ctx.fill();
-    }
-    // Pockets
-    for (const side of [-1, 1]) {
       ctx.beginPath();
-      ctx.arc(X(side * LANE.pocketX), U(LANE.pocketU), LANE.pocketR * 1.3 * scale, 0, Math.PI * 2);
-      ctx.fillStyle = pointColor(100);
+      ctx.arc(X(x), U(u), Math.max(1, (r - 0.12) * scale), 0, Math.PI * 2);
+      ctx.fillStyle = '#0b0714';
       ctx.fill();
-    }
+    };
+    for (let i = RINGS.length - 1; i >= 0; i--) cup(0, LANE.ringU, RINGS[i]!.r, RINGS[i]!.points);
+    for (const side of [-1, 1]) cup(side * LANE.pocketX, LANE.pocketU, LANE.pocketR, 100);
     // Landings: dots on the board, misses as crosses above it
     r.landings.forEach((l, i) => {
       const fresh = i === r.landings.length - 1;
