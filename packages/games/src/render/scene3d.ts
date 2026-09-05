@@ -271,6 +271,8 @@ export interface Scene3D {
   resize(width: number, height: number, dpr: number): void;
   /** Clear and set the camera for a frame. */
   begin(viewProj: Mat4, eye: Vec3, light: Vec3): void;
+  /** The pending GL error, if any, as text. */
+  error(): string;
   draw(mesh: GpuMesh, model: Mat4, opts?: DrawOptions): void;
 }
 
@@ -330,9 +332,23 @@ void main() {
   gl_FragColor = vec4(c * uAlpha, uAlpha);
 }`;
 
+/** Why the last createScene() returned null, for an on-screen message. */
+export let sceneError = '';
+
 export function createScene(canvas: HTMLCanvasElement): Scene3D | null {
-  const ctx = canvas.getContext('webgl', { alpha: true, antialias: true, premultipliedAlpha: true, depth: true });
-  if (!ctx) return null;
+  sceneError = '';
+  let ctx: WebGLRenderingContext | null = null;
+  try {
+    ctx = (canvas.getContext('webgl', { alpha: true, antialias: true, premultipliedAlpha: true, depth: true }) ??
+      canvas.getContext('experimental-webgl', { alpha: true, premultipliedAlpha: true, depth: true })) as WebGLRenderingContext | null;
+  } catch (e) {
+    sceneError = `WebGL context failed: ${String(e)}`;
+    return null;
+  }
+  if (!ctx) {
+    sceneError = 'WebGL is not available in this browser';
+    return null;
+  }
   const gl: WebGLRenderingContext = ctx;
   const program = gl.createProgram()!;
   for (const [type, src] of [
@@ -343,13 +359,18 @@ export function createScene(canvas: HTMLCanvasElement): Scene3D | null {
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
     if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-      console.warn('scene shader failed', gl.getShaderInfoLog(sh));
+      sceneError = `Shader failed: ${gl.getShaderInfoLog(sh) ?? '?'}`;
+      console.warn('scene shader failed', sceneError);
       return null;
     }
     gl.attachShader(program, sh);
   }
   gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return null;
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    sceneError = `Shader link failed: ${gl.getProgramInfoLog(program) ?? '?'}`;
+    return null;
+  }
+  const maxSize = (gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number) || 4096;
   gl.useProgram(program);
 
   const aPos = gl.getAttribLocation(program, 'aPos');
@@ -403,9 +424,17 @@ export function createScene(canvas: HTMLCanvasElement): Scene3D | null {
     sphere,
     disc,
     resize(width, height, dpr) {
-      canvas.width = Math.max(1, Math.floor(width * dpr));
-      canvas.height = Math.max(1, Math.floor(height * dpr));
+      // Keep the drawing buffer inside what the GPU allows (and sane on 3× phones).
+      let scale = Math.min(dpr, 2.5);
+      const longest = Math.max(width, height) * scale;
+      if (longest > maxSize) scale *= maxSize / longest;
+      canvas.width = Math.max(1, Math.floor(width * scale));
+      canvas.height = Math.max(1, Math.floor(height * scale));
       gl.viewport(0, 0, canvas.width, canvas.height);
+    },
+    error() {
+      const e = gl.getError();
+      return e === gl.NO_ERROR ? '' : `GL error 0x${e.toString(16)}`;
     },
     begin(viewProj, eye, light) {
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
