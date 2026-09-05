@@ -61,8 +61,8 @@ input {
   margin: 0 auto;
 }
 .screen.playing {
-  gap: 10px;
-  padding: calc(10px + var(--safe-top)) 10px calc(10px + var(--safe-bottom));
+  gap: 6px;
+  padding: calc(6px + var(--safe-top)) 6px calc(6px + var(--safe-bottom));
 }
 .game-root {
   flex: 1;
