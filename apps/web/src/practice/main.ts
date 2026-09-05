@@ -63,21 +63,28 @@ function run(gameId: string) {
     app.replaceChildren(pickerScreen());
     return;
   }
-  history.replaceState(null, '', `/practice/?game=${gameId}&obstacles=${obstacles ? 'on' : 'off'}`);
+  const hasObstacles = client.meta.options?.includes('obstacles') ?? false;
+  const query = (on: boolean) => `/practice/?game=${gameId}${hasObstacles ? `&obstacles=${on ? 'on' : 'off'}` : ''}`;
+  history.replaceState(null, '', query(obstacles));
 
-  const instance: GameInstance = server.create({ players: [me], random: Math.random, now: () => performance.now(), options: { obstacles } });
+  const instance: GameInstance = server.create({ players: [me], random: Math.random, now: () => performance.now(), options: hasObstacles ? { obstacles } : {} });
   // Debug hook for tooling: the authoritative instance.
   (window as unknown as { __practiceGame?: GameInstance }).__practiceGame = instance;
   const gameRoot = h('div', { class: 'game-root' });
-  const other = `/practice/?game=${gameId}&obstacles=${obstacles ? 'off' : 'on'}`;
-  const modeChip = h('span', { class: `practice-mode${obstacles ? ' practice-mode-on' : ''}` }, obstacles ? '⚠ Obstacles' : 'Classic');
+  const other = query(!obstacles);
+  const variant = hasObstacles
+    ? [
+        h('span', { class: `practice-mode${obstacles ? ' practice-mode-on' : ''}` }, obstacles ? '⚠ Obstacles' : 'Classic'),
+        h('a', { class: 'btn btn-link', href: other, title: 'Play the other variant' }, obstacles ? 'Try classic' : 'Try obstacles'),
+      ]
+    : [];
   const bar = h(
     'div',
     { class: 'practice-bar' },
-    h('span', { class: 'practice-title' }, 'Practice'),
-    modeChip,
-    h('a', { class: 'btn btn-link', href: other, title: 'Play the other variant' }, obstacles ? 'Try classic' : 'Try obstacles'),
+    h('span', { class: 'practice-title' }, client.meta.name),
+    ...variant,
     h('button', { class: 'btn btn-link', onClick: () => run(gameId) }, 'Restart'),
+    h('a', { class: 'btn btn-link', href: '/practice/' }, 'All games'),
   );
   app.replaceChildren(h('main', { class: 'screen playing' }, bar, gameRoot));
 
@@ -94,8 +101,9 @@ function run(gameId: string) {
       clearInterval(timer);
       bar.replaceChildren(
         h('span', { class: 'practice-title' }, '🏁 Finished'),
-        h('button', { class: 'btn btn-primary btn-small', onClick: () => run(gameId) }, 'Race again'),
-        h('a', { class: 'btn btn-link', href: other }, obstacles ? 'Try classic' : 'Try obstacles'),
+        h('button', { class: 'btn btn-primary btn-small', onClick: () => run(gameId) }, 'Play again'),
+        ...(hasObstacles ? [h('a', { class: 'btn btn-link', href: other }, obstacles ? 'Try classic' : 'Try obstacles')] : []),
+        h('a', { class: 'btn btn-link', href: '/practice/' }, 'All games'),
       );
     }
   }, TICK_MS);

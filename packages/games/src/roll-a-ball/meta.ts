@@ -6,4 +6,5 @@ export const rollABallMeta: GameMeta = {
   tagline: 'Flick balls up the ramp to race your horse to the finish.',
   minPlayers: 1,
   maxPlayers: 8,
+  options: ['obstacles'],
 };

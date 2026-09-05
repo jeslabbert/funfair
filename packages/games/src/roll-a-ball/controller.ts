@@ -9,14 +9,10 @@ import {
   clamp,
   clampLaunch,
   clampLaunchPosition,
-  cloneTable,
   grabBall,
-  launchBall,
-  msToTick,
   ordinal,
-  stepTable,
   tableObstacles,
-  tablesMatch,
+  tableRules,
   WAVE_FADE_TICKS,
   WAVE_NAMES,
   type Obstacles,
@@ -27,35 +23,19 @@ import {
   type TableState,
   type Zone,
 } from './logic';
-import { QUAT_IDENTITY, createBallRenderer, quatFromAxisAngle, quatMultiply, quatNormalize, type Quat } from './ball3d';
+import { QUAT_IDENTITY, createBallRenderer, quatFromAxisAngle, quatMultiply, quatNormalize, type Quat } from '../render/ball3d';
+import { buzz, fitFont, hexToRgb, hexToRgba, readFlick, shade, type Sample } from '../render/util';
+import { Prediction } from '../lockstep/client';
 
 export const ZONE_COLORS: Record<Zone, string> = { walk: '#5ce07a', trot: '#ffb547', gallop: '#ff5c5c' };
 
-/** Flick speed (canvas heights per second) that counts as a full-power snap. */
-const POWER_SCALE = 8;
-/** Swipe length, as a fraction of the canvas height, that counts as a full-power pull. */
-const DISTANCE_SCALE = 0.75;
-const MIN_FLICK_PX = 24;
-const VELOCITY_WINDOW_MS = 180;
 const POPUP_MS = 900;
 const LABEL_MS = 650;
 const SINK_MS = 340;
 const HOP_MS = 160;
 const APPEAR_MS = 260;
-/** Local prediction keeps this many ticks of history to check against server snapshots. */
-const LOCAL_HISTORY = 96;
-/** Pending inputs are kept this long in case a snapshot arrives that predates them. */
-const PENDING_INPUT_MS = 800;
-/** Never step more than this per frame (a backgrounded tab catching up). */
-const MAX_STEPS_PER_FRAME = 48;
 /** Vertical squash of circles on the receding table (viewing angle). */
 const SQUASH = 0.68;
-
-interface Sample {
-  x: number;
-  y: number;
-  t: number;
-}
 
 interface Drag {
   ballId: number;
@@ -142,12 +122,7 @@ export function mountRollABallController(
   let me: PlayerInfo | null = null;
   let players = new Map<string, PlayerInfo>();
   /** The predicted table: stepped locally, checked against server snapshots. */
-  let table: TableState | null = null;
-  const localHistory: (TableState | undefined)[] = new Array(LOCAL_HISTORY);
-  /** Race clock estimate: raceMs ≈ performance.now() + raceOffset, from the freshest of recent snapshots. */
-  let raceOffset = -Infinity;
-  let clockSamples: number[] = [];
-  let pending: { input: RollABallInput; sentAt: number }[] = [];
+  const pred = new Prediction<TableState, RollABallInput, TableEvent>(tableRules);
   let drag: Drag | null = null;
   let labels: FloatingLabel[] = [];
   let sinks: Sink[] = [];
@@ -208,72 +183,18 @@ export function mountRollABallController(
     return !!state && (state.phase === 'racing' || state.phase === 'finished');
   }
 
-  function raceNow(now: number) {
-    return raceOffset === -Infinity ? 0 : now + raceOffset;
-  }
-
-  function remember(t: TableState) {
-    localHistory[t.tick % LOCAL_HISTORY] = cloneTable(t);
-  }
-
   /** Step the predicted table up to the current race clock, announcing what happens. */
   function advanceLocal(now: number) {
-    if (!table || !racing()) return;
-    const target = msToTick(raceNow(now));
-    let steps = 0;
-    while (table.tick < target && steps++ < MAX_STEPS_PER_FRAME) {
-      const events: TableEvent[] = [];
-      stepTable(table, events);
-      remember(table);
-      for (const ev of events) onEvent(ev, now);
-    }
-  }
-
-  /** Adopt a server snapshot if our prediction disagrees with it, keeping our newer inputs. */
-  function reconcile(snapshot: TableState) {
-    const now = performance.now();
-    pending = pending.filter((p) => now - p.sentAt < PENDING_INPUT_MS);
-    if (!table) {
-      table = cloneTable(snapshot);
-      remember(table);
-      return;
-    }
-    if (snapshot.tick <= table.tick) {
-      const ours = localHistory[snapshot.tick % LOCAL_HISTORY];
-      if (ours && ours.tick === snapshot.tick && tablesMatch(ours, snapshot)) return; // in step
-    }
-    // Out of step: take the server's word and replay up to where we were.
-    const wasAt = table.tick;
-    table = cloneTable(snapshot);
-    if (drag) {
-      const held = table.balls.find((b) => b.id === drag!.ballId);
-      if (held && held.status === 'resting') grabBall(table, held.id);
-    }
-    remember(table);
-    const replay = pending.map((p) => p.input).filter((i) => i.tick > snapshot.tick);
-    while (table.tick < wasAt) {
-      for (const input of replay) {
-        if (input.tick !== table.tick) continue;
-        if (input.type === 'grab') grabBall(table, input.ball);
-        else launchBall(table, input);
-      }
-      const events: TableEvent[] = [];
-      stepTable(table, events);
-      remember(table);
-    }
-  }
-
-  function sendInput(input: RollABallInput) {
-    pending.push({ input, sentAt: performance.now() });
-    send(input);
+    if (!racing()) return;
+    pred.advance(now, (ev) => onEvent(ev, now));
   }
 
   function restingBalls(): BallState[] {
-    return table?.balls.filter((b) => b.status === 'resting') ?? [];
+    return pred.state?.balls.filter((b) => b.status === 'resting') ?? [];
   }
 
   function canGrab() {
-    return !!state && state.phase === 'racing' && state.me.finishedAt === null && !drag && !!table;
+    return !!state && state.phase === 'racing' && state.me.finishedAt === null && !drag && !!pred.state;
   }
 
   // ---- input --------------------------------------------------------------
@@ -296,7 +217,7 @@ export function mountRollABallController(
         best = b;
       }
     }
-    if (!best || !table) return;
+    if (!best || !pred.state) return;
     const at = clampLaunchPosition(best.x, best.y);
     drag = { ballId: best.id, pointerId: e.pointerId, x: at.x, y: at.y, samples: [{ x: e.clientX, y: e.clientY, t: e.timeStamp }] };
     try {
@@ -304,8 +225,9 @@ export function mountRollABallController(
     } catch {
       /* synthetic pointer */
     }
-    grabBall(table, best.id);
-    sendInput({ type: 'grab', ball: best.id, tick: table.tick });
+    const id = best.id;
+    const input = pred.input((tick) => ({ type: 'grab', ball: id, tick }));
+    if (input) send(input);
     buzz(8);
   });
   canvas.addEventListener('pointermove', (e) => {
@@ -325,9 +247,9 @@ export function mountRollABallController(
     const vel = gesture ? clampLaunch(speed * gesture.dirX, speed * gesture.dirY) : { vx: 0, vy: 0 };
     const launch = { ball: drag.ballId, x: drag.x, y: drag.y, vx: vel.vx, vy: vel.vy };
     drag = null;
-    if (!table || !state || state.phase !== 'racing') return;
-    launchBall(table, launch);
-    sendInput({ type: 'roll', ...launch, tick: table.tick });
+    if (!pred.state || !state || state.phase !== 'racing') return;
+    const input = pred.input((tick) => ({ type: 'roll', ...launch, tick }));
+    if (input) send(input);
   };
   canvas.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
@@ -383,8 +305,8 @@ export function mountRollABallController(
 
   /** Advance each rolling ball's spin and trail by how far it moved since the last frame. */
   function updateSpins() {
-    if (!table) return;
-    for (const b of table.balls) {
+    if (!pred.state) return;
+    for (const b of pred.state.balls) {
       if (b.status !== 'rolling' && b.status !== 'resting') {
         prevBoard.delete(b.id);
         continue;
@@ -419,7 +341,7 @@ export function mountRollABallController(
     advanceLocal(now);
     updateSpins();
     drawBoard();
-    const obstacles = table ? tableObstacles(table) : null;
+    const obstacles = pred.state ? tableObstacles(pred.state) : null;
     drawHoles(obstacles);
     if (obstacles) drawObstacles(obstacles, now);
     drawBalls(now);
@@ -735,8 +657,8 @@ export function mountRollABallController(
   /** Where every ball is on screen this frame. */
   function poses(now: number): BallPose[] {
     const out: BallPose[] = [];
-    if (!table) return out;
-    for (const b of table.balls) {
+    if (!pred.state) return out;
+    for (const b of pred.state.balls) {
       if (drag && drag.ballId === b.id) {
         const { x, y } = toCanvas(drag.x, drag.y);
         out.push({ id: b.id, x, y, scale: 1.12, alpha: 1, lifted: true, sinkingInto: null, sink: 0 });
@@ -863,8 +785,8 @@ export function mountRollABallController(
     const color = me?.color ?? '#fff';
     const grab = canGrab();
     const list = poses(now).sort((a, b) => a.y - b.y);
-    if (table) {
-      for (const b of table.balls) {
+    if (pred.state) {
+      for (const b of pred.state.balls) {
         if (b.status !== 'rolling') continue;
         drawTrail(b, ballPx(toCanvas(b.x, b.y).y), color);
       }
@@ -990,7 +912,7 @@ export function mountRollABallController(
   resize();
   raf = requestAnimationFrame(frame);
   // Debug hook: the predicted table, for tooling and tests.
-  (window as unknown as { __rabTable?: () => TableState | null }).__rabTable = () => table;
+  (window as unknown as { __rabTable?: () => TableState | null }).__rabTable = () => pred.state;
 
   return {
     update(next, meInfo, playerList) {
@@ -998,16 +920,14 @@ export function mountRollABallController(
       me = meInfo;
       players = new Map(playerList.map((p) => [p.id, p]));
 
-      // Race clock: only while it's running, and the earliest-arriving of recent snapshots is the best estimate.
-      if (next.phase === 'racing' || next.phase === 'finished') {
-        clockSamples.push(next.raceMs - performance.now());
-        if (clockSamples.length > 20) clockSamples.shift();
-        raceOffset = Math.max(...clockSamples);
-      } else {
-        clockSamples = [];
-        raceOffset = -Infinity;
-      }
-      reconcile(next.table);
+      pred.sampleClock(next.raceMs, next.phase === 'racing' || next.phase === 'finished');
+      pred.reconcile(next.table, (t) => {
+        // Keep hold of the ball we're dragging even if the server hasn't seen the grab yet.
+        if (drag) {
+          const held = t.balls.find((b) => b.id === drag!.ballId);
+          if (held && held.status === 'resting') grabBall(t, held.id);
+        }
+      });
 
       rankEl.textContent = next.phase === 'countdown' ? 'Ready?' : `${ordinal(next.me.rank)} of ${next.playerCount}`;
       scoreEl.textContent = `${next.me.progress} / ${next.trackLength}`;
@@ -1043,74 +963,4 @@ function eventLabel(ev: TableEvent): { text: string; color: string } | null {
     default:
       return null;
   }
-}
-
-/**
- * Turn a pointer trace into a launch: power (0..1) from the flick's snap speed
- * and its length, plus a unit direction from the drag; null if it wasn't a flick.
- */
-export function readFlick(samples: Sample[], canvasHeight: number): { power: number; dirX: number; dirY: number } | null {
-  if (samples.length < 2 || canvasHeight <= 0) return null;
-  const last = samples[samples.length - 1]!;
-  // Velocity from the final window of the gesture, so a slow wind-up
-  // followed by a snap still counts as a snap.
-  let ref = samples[0]!;
-  for (const s of samples) {
-    if (last.t - s.t <= VELOCITY_WINDOW_MS) {
-      ref = s;
-      break;
-    }
-  }
-  const dx = last.x - ref.x;
-  const dy = ref.y - last.y; // up is positive
-  if (dy < MIN_FLICK_PX * 0.5) return null;
-  const dt = Math.max(16, last.t - ref.t);
-  const speed = dy / canvasHeight / (dt / 1000); // canvas heights per second
-  // Half from how hard you snap, half from how far the final flick travelled.
-  const power = clamp(0.5 * (speed / POWER_SCALE) + 0.5 * (dy / canvasHeight / (DISTANCE_SCALE * 0.5)), 0, 1);
-  const len = Math.sqrt(dx * dx + dy * dy);
-  return { power, dirX: dx / len, dirY: dy / len };
-}
-
-/** Sets ctx.font at the largest size (≤ max) where `text` fits in `maxWidth`; returns the size. */
-export function fitFont(ctx: CanvasRenderingContext2D, text: string, weight: number, max: number, maxWidth: number): number {
-  let size = max;
-  ctx.font = `${weight} ${size}px system-ui, sans-serif`;
-  const width = ctx.measureText(text).width;
-  if (width > maxWidth) {
-    size = Math.max(12, Math.floor((max * maxWidth) / width));
-    ctx.font = `${weight} ${size}px system-ui, sans-serif`;
-  }
-  return size;
-}
-
-function buzz(pattern: number | number[]) {
-  try {
-    navigator.vibrate?.(pattern);
-  } catch {
-    /* not supported */
-  }
-}
-
-function hexToRgb(hex: string): [number, number, number] {
-  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
-  if (!m) return [1, 1, 1];
-  return [parseInt(m[1]!, 16) / 255, parseInt(m[2]!, 16) / 255, parseInt(m[3]!, 16) / 255];
-}
-
-function hexToRgba(hex: string, a: number): string {
-  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
-  if (!m) return `rgba(255,255,255,${a})`;
-  return `rgba(${parseInt(m[1]!, 16)},${parseInt(m[2]!, 16)},${parseInt(m[3]!, 16)},${a})`;
-}
-
-function shade(hex: string, amount: number): string {
-  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
-  if (!m) return hex;
-  const f = (c: string) => {
-    const v = parseInt(c, 16);
-    const n = amount < 0 ? Math.round(v * (1 + amount)) : Math.round(v + (255 - v) * amount);
-    return clamp(n, 0, 255).toString(16).padStart(2, '0');
-  };
-  return `#${f(m[1]!)}${f(m[2]!)}${f(m[3]!)}`;
 }

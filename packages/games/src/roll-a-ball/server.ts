@@ -1,18 +1,16 @@
 import type { GameContext, GameInstance, GameResults, GameServerDefinition } from '@funfair/shared';
 import { rollABallMeta } from './meta';
+import { LockstepSim } from '../lockstep/server';
 import {
   COUNTDOWN_MS,
   FINISH_LINGER_MS,
   HOLES,
   TRACK_LENGTH,
-  cloneTable,
   createTable,
-  grabBall,
   isRollInput,
-  launchBall,
   msToTick,
   ordinal,
-  stepTable,
+  tableRules,
   waveAt,
   WAVE_NAMES,
   type BallView,
@@ -31,19 +29,8 @@ import {
 const FEED_LENGTH = 8;
 /** How far back (in ticks, 120/s) a late input may be applied: 300 ms. */
 export const MAX_REWIND_TICKS = 36;
-const HISTORY_SIZE = MAX_REWIND_TICKS + 4;
 
-/** One player's table, with enough history to rewind for late inputs. */
-interface RacerSim {
-  table: TableState;
-  history: (TableState | undefined)[];
-  /** Inputs must arrive in tick order; a later one can't rewind past an earlier one. */
-  lastInputTick: number;
-  /** Never rewind past something that scored or went on the feed. */
-  lastScoreTick: number;
-  /** Inputs stamped a little ahead of the table, applied when their tick comes. */
-  queued: RollABallInput[];
-}
+type RacerSim = LockstepSim<TableState, RollABallInput, TableEvent>;
 
 export class RollABallGame implements GameInstance<RollABallHostState, RollABallPlayerState, RollABallInput> {
   private phase: RacePhase = 'countdown';
@@ -66,7 +53,7 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
     for (const p of ctx.players) {
       const table = createTable(this.seed, this.obstacles);
       this.racers.set(p.id, { playerId: p.id, progress: 0, rolls: 0, lastRoll: null, balls: views(table), finishedAt: null, rank: 1 });
-      this.sims.set(p.id, { table, history: new Array(HISTORY_SIZE), lastInputTick: -1, lastScoreTick: -1, queued: [] });
+      this.sims.set(p.id, new LockstepSim(tableRules, table, MAX_REWIND_TICKS));
     }
     this.updateRanks();
   }
@@ -78,33 +65,8 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
     const sim = this.sims.get(playerId);
     if (!racer || !sim || racer.finishedAt !== null) return;
 
-    // Apply the input at the tick the player did it, within reason.
-    const now = sim.table.tick;
-    const wanted = Math.floor(input.tick);
-    if (wanted > now) {
-      // A phone running a little ahead of us: hold the input for its tick.
-      const at = Math.min(wanted, now + MAX_REWIND_TICKS);
-      sim.queued.push({ ...input, tick: at });
-      sim.queued.sort((a, b) => a.tick - b.tick);
-      return;
-    }
-    let at = Math.max(now - MAX_REWIND_TICKS, wanted);
-    at = Math.max(at, sim.lastInputTick, sim.lastScoreTick);
-    if (at < now) {
-      const past = sim.history[at % HISTORY_SIZE];
-      if (past && past.tick === at) sim.table = cloneTable(past);
-      else at = now;
-    }
-    sim.lastInputTick = at;
-    this.apply(sim, input);
-    // Bring the table back up to date; anything that happens on the way scores as usual.
-    while (sim.table.tick < now) this.stepOne(racer, sim);
-    racer.balls = views(sim.table);
-  }
-
-  private apply(sim: RacerSim, input: RollABallInput): void {
-    if (input.type === 'grab') grabBall(sim.table, input.ball);
-    else launchBall(sim.table, input);
+    sim.input(input, (ev) => this.score(racer, sim, ev));
+    racer.balls = views(sim.state);
   }
 
   tick(dtMs: number): void {
@@ -124,8 +86,8 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
         for (const racer of this.racers.values()) {
           const sim = this.sims.get(racer.playerId)!;
           const before = racer.progress;
-          while (sim.table.tick < target) this.stepOne(racer, sim);
-          racer.balls = views(sim.table);
+          sim.advanceTo(target, (ev) => this.score(racer, sim, ev));
+          racer.balls = views(sim.state);
           if (racer.progress !== before) changed = true;
         }
         if (changed) this.updateRanks();
@@ -136,19 +98,6 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
         break;
       }
     }
-  }
-
-  private stepOne(racer: RacerState, sim: RacerSim): void {
-    // Inputs whose tick has come go in before this step.
-    while (sim.queued.length && sim.queued[0]!.tick <= sim.table.tick) {
-      const input = sim.queued.shift()!;
-      sim.lastInputTick = Math.max(sim.lastInputTick, sim.table.tick);
-      this.apply(sim, input);
-    }
-    const events: TableEvent[] = [];
-    stepTable(sim.table, events);
-    sim.history[sim.table.tick % HISTORY_SIZE] = cloneTable(sim.table);
-    for (const ev of events) this.score(racer, sim, ev);
   }
 
   private score(racer: RacerState, sim: RacerSim, ev: TableEvent): void {
@@ -172,7 +121,7 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
     } else {
       return;
     }
-    sim.lastScoreTick = ev.tick;
+    sim.barrier(ev.tick);
     racer.rolls += 1;
     racer.progress = Math.min(TRACK_LENGTH, racer.progress + points);
     racer.lastRoll = { kind, points, zone, row, col, seq: racer.rolls, at: this.raceMs };
@@ -210,7 +159,7 @@ export class RollABallGame implements GameInstance<RollABallHostState, RollABall
 
   playerState(playerId: string): RollABallPlayerState {
     const me = this.racers.get(playerId) ?? { playerId, progress: 0, rolls: 0, lastRoll: null, balls: [], finishedAt: null, rank: 0 };
-    const table = this.sims.get(playerId)?.table ?? createTable(this.seed, this.obstacles);
+    const table = this.sims.get(playerId)?.state ?? createTable(this.seed, this.obstacles);
     let leaderProgress = 0;
     for (const r of this.racers.values()) leaderProgress = Math.max(leaderProgress, r.progress);
     return {
