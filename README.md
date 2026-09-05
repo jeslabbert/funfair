@@ -43,7 +43,8 @@ PWA experience).
 
 ```
 packages/shared   Protocol + game contracts shared by server and browser
-packages/games    One folder per game: rules, server instance, host view, phone view
+packages/games    One folder per game: rules, server instance, host view, phone view;
+                  lockstep/ (rewind + prediction) and render/ (WebGL scene, sphere, helpers) shared
                   + lockstep/ (shared rewind/prediction netcode) and render/ (sphere, flick, canvas helpers)
 apps/server       Node + ws: rooms, sessions, reconnects, the game loop, static hosting
 apps/web          Vite app: / = host screen, /play/ = phone controller (PWA), /practice/ = solo range
@@ -153,12 +154,17 @@ can be unit-tested with `node:test` (`pnpm test`).
 
 ## Skee-Ball Alley
 
-- Nine balls each, sixty seconds. The phone shows a lane in perspective: a **tray of balls**
-  under the lane, the run-up (drag a ball anywhere up to the dashed line before you let
-  go), the **jump ramp** at the end, a pit, and the **ring board** tilted back behind it.
-  The rings are **raised cups**: 20/30/40/50 from the outside in, and two top-corner
-  **pockets for 100**. A ball that rolls off the foot of the board lands in the 10 trough;
-  over the top is a miss. The pit between ramp and board also drains into the 10.
+- Nine balls each, sixty seconds. The phone renders the whole alley as a **WebGL scene**
+  (`render/scene3d.ts`: a small lit-mesh renderer, no libraries): a tray of balls in front
+  of the bumper, the lane and its rails, the run-up (drag a ball anywhere up to the line
+  before you let go), the **jump ramp**, a sunken pit, the cabinet, and the **ring board**
+  tilted back behind it. The rings are real geometry: **raised rims around recessed holes**
+  – 20/30/40/50 from the outside in, and two top-corner **pockets for 100** – so a ball
+  visibly climbs a rim, rattles inside the cup and drops out of sight into the hole. A ball
+  that rolls off the foot of the board drops into the 10 trough; over the top is a miss.
+  The pit between ramp and board also drains into the 10. Touches are mapped back onto the
+  table by unprojecting the finger onto the lane plane; only text (cup values, popups,
+  the countdown) is drawn on a 2D overlay.
 - Same feel as the Derby: grab, drag, flick. The lane leans back so a weak roll comes back
   to the bumper and stays where it settles (grab it again); a ball that reaches the ramp
   faster than `minJumpSpeed` takes off at 52° and flies (plain ballistics, bouncing off the

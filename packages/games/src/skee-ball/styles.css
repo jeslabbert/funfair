@@ -254,15 +254,28 @@
   width: 10px;
   height: 10px;
 }
-.skb-lane {
+.skb-stage {
+  position: relative;
   flex: 1;
   min-height: 0;
-  width: 100%;
-  display: block;
-  touch-action: none;
   border-radius: 20px;
   background: radial-gradient(ellipse at 50% 15%, #241a4d, #0e1130 70%);
   border: 2px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.skb-gl,
+.skb-lane {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.skb-gl {
+  pointer-events: none;
+}
+.skb-lane {
+  touch-action: none;
   user-select: none;
   -webkit-user-select: none;
 }
