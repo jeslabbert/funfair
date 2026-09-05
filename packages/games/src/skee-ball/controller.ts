@@ -83,7 +83,9 @@ const BOARD: Frame = {
   en: [0, -LANE.boardSin, LANE.boardCos],
 };
 const CAMERA_EYE: Vec3 = [0, -13.5, 9.0];
-const CAMERA_TARGET: Vec3 = [0, 6.4, 0.4];
+const CAMERA_TARGET: Vec3 = [0, 6.2, -0.2];
+/** Half of the horizontal field of view. */
+const HALF_HFOV = (12.4 * Math.PI) / 180;
 const LIGHT: Vec3 = [-0.35, -0.5, 0.78];
 
 interface Drag {
@@ -150,28 +152,22 @@ export function mountSkeeBallController(
 ): ControllerView<SkeeBallPlayerState> {
   root.innerHTML = `
     <div class="skb-ctl">
-      <div class="skb-ctl-top">
-        <div class="skb-ctl-rank">—</div>
-        <div class="skb-ctl-score">0</div>
+      <div class="skb-ctl-bar">
+        <div class="skb-ctl-pips" aria-label="balls left"></div>
         <div class="skb-ctl-timer">1:00</div>
       </div>
-      <div class="skb-ctl-pips" aria-label="balls left"></div>
       <div class="skb-stage">
         <canvas class="skb-gl"></canvas>
         <canvas class="skb-lane"></canvas>
       </div>
-      <div class="skb-ctl-hint">Grab a ball from the tray and flick it up the lane</div>
     </div>`;
 
   const el = root.querySelector<HTMLElement>('.skb-ctl')!;
   const stage = root.querySelector<HTMLElement>('.skb-stage')!;
   const glCanvas = root.querySelector<HTMLCanvasElement>('.skb-gl')!;
   const canvas = root.querySelector<HTMLCanvasElement>('.skb-lane')!;
-  const rankEl = root.querySelector<HTMLElement>('.skb-ctl-rank')!;
-  const scoreEl = root.querySelector<HTMLElement>('.skb-ctl-score')!;
   const timerEl = root.querySelector<HTMLElement>('.skb-ctl-timer')!;
   const pipsEl = root.querySelector<HTMLElement>('.skb-ctl-pips')!;
-  const hintEl = root.querySelector<HTMLElement>('.skb-ctl-hint')!;
   const ctx = canvas.getContext('2d')!;
   const scene = createScene(glCanvas);
   /** Anything that stops the 3D scene from drawing, shown on the overlay. */
@@ -188,6 +184,7 @@ export function mountSkeeBallController(
   let flashes: Flash[] = [];
   let popup: Popup | null = null;
   let shownScore = 0;
+  let scoreBumpAt = -Infinity;
   let raf = 0;
   let W = 0;
   let H = 0;
@@ -218,7 +215,9 @@ export function mountSkeeBallController(
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     scene?.resize(W, H, dpr);
     if (W && H) {
-      const proj = mat4Perspective((34 * Math.PI) / 180, W / H, 0.5, 80);
+      // A fixed horizontal field of view: the table always fits across, taller screens just see more.
+      const vFov = 2 * Math.atan(Math.tan(HALF_HFOV) / (W / H));
+      const proj = mat4Perspective(vFov, W / H, 0.5, 80);
       const view = mat4LookAt(CAMERA_EYE, CAMERA_TARGET, [0, 0, 1]);
       viewProj = mat4Multiply(proj, view);
       viewProjInv = mat4Invert(viewProj);
@@ -479,6 +478,7 @@ export function mountSkeeBallController(
       wrapText(ctx, `3D view unavailable · ${problem}`, W / 2, H * 0.45, W * 0.85, Math.max(16, W * 0.045));
     }
     drawCupLabels();
+    drawHud(now);
     drawHint(now);
     drawLabels(now);
     drawPopup(now);
@@ -645,6 +645,36 @@ export function mountSkeeBallController(
     for (const side of [-1, 1]) label('10', framePoint(BOARD, side * (LANE.boardHalfWidth - 0.5), 0.45, 0.02), 'rgba(255,255,255,0.45)', Math.min(unitPx * 0.26, W * 0.03));
   }
 
+  /** Score and standing in the top corners of the view. */
+  function drawHud(now: number) {
+    if (!state || !me) return;
+    const pop = 1 + 0.35 * Math.max(0, 1 - (now - scoreBumpAt) / 350);
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    const big = Math.max(26, W * 0.11) * pop;
+    ctx.font = `900 ${big}px system-ui, sans-serif`;
+    ctx.fillStyle = me.color;
+    ctx.strokeText(String(state.me.score), 12, 8);
+    ctx.fillText(String(state.me.score), 12, 8);
+    const small = Math.max(11, W * 0.034);
+    ctx.font = `700 ${small}px system-ui, sans-serif`;
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.lineWidth = 3;
+    const standing = state.phase === 'countdown' ? 'Ready?' : `${ordinal(state.me.rank)} of ${state.playerCount}`;
+    ctx.strokeText(standing, 13, 10 + big);
+    ctx.fillText(standing, 13, 10 + big);
+    if (state.phase === 'playing' && state.playerCount > 1) {
+      const gap = state.leaderScore - state.me.score;
+      const note = gap <= 0 ? 'leading' : `${gap} behind`;
+      ctx.textAlign = 'right';
+      ctx.fillStyle = gap <= 0 ? '#5ce07a' : 'rgba(255,255,255,0.75)';
+      ctx.strokeText(note, W - 12, 10);
+      ctx.fillText(note, W - 12, 10);
+    }
+  }
+
   function drawHint(now: number) {
     if (!canGrab() || !pred.state) return;
     const next = grabbable()[0];
@@ -704,7 +734,7 @@ export function mountSkeeBallController(
     if (state.phase === 'countdown') {
       const secs = Math.ceil(state.countdownMs / 1000);
       big = secs > 0 ? String(secs) : 'GO!';
-      small = `${BALLS_PER_PLAYER} balls, ${Math.round(state.roundMsLeft / 1000)} seconds. Aim for the cups!`;
+      small = `${BALLS_PER_PLAYER} balls, ${Math.round(state.roundMsLeft / 1000)} seconds. Grab from the tray, flick up the lane.`;
     } else if (state.phase === 'finished') {
       const winner = state.winnerId ? players.get(state.winnerId) : null;
       const iWon = state.winnerId === me?.id;
@@ -759,30 +789,15 @@ export function mountSkeeBallController(
         }
       });
 
-      rankEl.textContent = next.phase === 'countdown' ? 'Ready?' : `${ordinal(next.me.rank)} of ${next.playerCount}`;
       if (next.me.score !== shownScore) {
         shownScore = next.me.score;
-        scoreEl.textContent = String(next.me.score);
-        scoreEl.classList.remove('skb-bump');
-        void scoreEl.offsetWidth;
-        scoreEl.classList.add('skb-bump');
+        scoreBumpAt = performance.now();
       }
-      scoreEl.style.color = meInfo.color;
       const secs = Math.ceil(next.roundMsLeft / 1000);
       timerEl.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
       timerEl.classList.toggle('skb-ctl-timer-low', next.phase === 'playing' && secs <= 10);
       renderPips(next.me.ballsLeft);
       for (const pip of Array.from(pipsEl.children)) (pip as HTMLElement).style.background = meInfo.color;
-      hintEl.textContent =
-        next.phase === 'playing'
-          ? next.me.ballsLeft === 0
-            ? 'All balls thrown!'
-            : next.me.score >= next.leaderScore
-              ? "You're leading — keep them coming!"
-              : `${next.leaderScore - next.me.score} behind the leader`
-          : next.phase === 'countdown'
-            ? 'Drag a ball onto the lane, flick it up the ramp'
-            : 'Round over!';
       el.classList.toggle('skb-ctl-finished', next.phase === 'finished');
     },
     destroy() {

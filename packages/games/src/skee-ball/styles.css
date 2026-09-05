@@ -92,8 +92,7 @@
   color: var(--c);
   font-variant-numeric: tabular-nums;
 }
-.skb-card-pips,
-.skb-ctl-pips {
+.skb-card-pips {
   display: flex;
   gap: 5px;
 }
@@ -226,33 +225,28 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  gap: 6px;
+  gap: 4px;
 }
-.skb-ctl-top {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: baseline;
+.skb-ctl-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
-  padding: 4px 6px 0;
-  font-weight: 700;
+  padding: 0 8px;
+  font-weight: 800;
   font-variant-numeric: tabular-nums;
-}
-.skb-ctl-score {
-  font-size: 2rem;
-  font-weight: 900;
-  line-height: 1;
-  text-align: center;
-  transform-origin: center;
-}
-.skb-ctl-timer {
-  text-align: right;
+  line-height: 1.2;
 }
 .skb-ctl-pips {
-  justify-content: center;
+  display: flex;
+  gap: 5px;
 }
 .skb-ctl-pips i {
-  width: 10px;
-  height: 10px;
+  width: 11px;
+  height: 11px;
+}
+.skb-ctl-timer {
+  font-size: 1.05rem;
 }
 .skb-stage {
   position: relative;
