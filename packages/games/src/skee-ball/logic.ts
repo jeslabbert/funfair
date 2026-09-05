@@ -3,9 +3,11 @@
  * a fixed rate on the phone and the server alike. Arithmetic and sqrt only.
  *
  * A ball rolls up the lane (which leans gently back towards the player), hits
- * the jump ramp at the end, flies, and lands on the tilted ring board. Where
- * it lands is the score: 10 anywhere on the board, 20/30/40/50 in the rings,
- * 100 in the two top-corner pockets. Land too hard and it hops once first.
+ * the jump ramp at the end, flies, and lands on the tilted ring board. There it
+ * keeps rolling: the board is a slope, the rings are raised cups with lips, and
+ * the ball only scores once it drops into one – 20/30/40/50 in the rings, 100 in
+ * the two top-corner pockets, or 10 when it rolls back down into the trough at
+ * the foot of the board. Land too hard and it hops off the face once first.
  */
 
 export const BALLS_PER_PLAYER = 9;
@@ -24,19 +26,19 @@ export const LANE = {
   rampY: 8.0,
   /** …and launches the ball from here. */
   launchY: 8.8,
-  /** The ring board's base and tilt (60° back from the lane). */
-  boardBaseY: 11.4,
-  boardCos: 0.5,
-  boardSin: 0.8660254037844386,
+  /** The ring board's base and tilt (35° up from the floor). */
+  boardBaseY: 11.6,
+  boardCos: 0.8191520442889918,
+  boardSin: 0.573576436351046,
   boardHalfWidth: 2.3,
   /** Height of the board along its face. */
-  boardLength: 3.4,
+  boardLength: 4.2,
   /** Ring centre along the board face. */
-  ringU: 1.9,
+  ringU: 2.2,
   /** Corner pockets. */
-  pocketU: 3.0,
+  pocketU: 3.6,
   pocketX: 1.55,
-  pocketR: 0.3,
+  pocketR: 0.32,
 } as const;
 
 export const RINGS = [
@@ -64,15 +66,31 @@ export const PHYSICS = {
   /** Speed kept over the ramp. */
   rampKeep: 0.85,
   gravity: 16,
-  /** Faster than this into the board and the ball hops once before it settles. */
-  hopSpeed: 6,
-  hopRestitution: 0.35,
+  /** Faster than this into the board and the ball bounces before it lands. */
+  hopSpeed: 3,
+  hopRestitution: 0.4,
   hopTangentKeep: 0.75,
   wallRestitution: 0.5,
+  /** Speed along the face kept when the ball lands and starts rolling. */
+  landKeep: 0.6,
+  /** Rolling on the board: friction on the face, and extra drag rattling around inside a cup. */
+  faceFriction: 1.4,
+  cupDrag: 0.8,
+  /** Climbing a cup's lip from the face needs this much speed towards it… */
+  lipSpeed: 1.0,
+  /** …and climbing out of a cup needs this much. */
+  escapeSpeed: 2.8,
+  /** Faster than this over a lip and the ball skips the cup entirely. */
+  skipSpeed: 4.2,
+  /** Slower than this inside a cup and the ball drops in. */
+  captureSpeed: 0.6,
+  lipRestitution: 0.55,
+  skipDamping: 0.82,
+  boardWallRestitution: 0.5,
   stepMs: 1000 / 120,
 } as const;
 
-export type BallStatus = 'racked' | 'held' | 'rolling' | 'flying' | 'resting' | 'done';
+export type BallStatus = 'racked' | 'held' | 'rolling' | 'flying' | 'board' | 'resting' | 'done';
 
 export interface BallState {
   id: number;
@@ -82,6 +100,10 @@ export interface BallState {
   vx: number;
   vy: number;
   vz: number;
+  /** While rolling on the board: position up the face, speed along it, and steps spent there. */
+  u: number;
+  vu: number;
+  age: number;
   status: BallStatus;
   frozen: boolean;
   onBumper: boolean;
@@ -97,7 +119,20 @@ export interface TableState {
   balls: BallState[];
 }
 
-export type TableEventType = 'launch' | 'jump' | 'hop' | 'score' | 'miss' | 'rail' | 'wall' | 'bumper' | 'ball' | 'settle';
+export type TableEventType =
+  | 'launch'
+  | 'jump'
+  | 'hop'
+  | 'land'
+  | 'lip'
+  | 'skip'
+  | 'score'
+  | 'miss'
+  | 'rail'
+  | 'wall'
+  | 'bumper'
+  | 'ball'
+  | 'settle';
 
 export interface TableEvent {
   tick: number;
@@ -106,7 +141,7 @@ export interface TableEvent {
   x: number;
   y: number;
   z: number;
-  /** For scores: points and where on the board (u along the face). */
+  /** For scores: points and where on the board (u along the face). For lips/skips: the cup's points. */
   points?: number;
   u?: number;
   /** For misses: why. */
@@ -177,23 +212,44 @@ export function boardFrame(y: number, z: number): { d: number; u: number } {
   return { d: -dy * LANE.boardSin + z * LANE.boardCos, u: dy * LANE.boardCos + z * LANE.boardSin };
 }
 
-/** Points for a landing on the board face. */
+/**
+ * The cups on the face. A region is what the ball is over: -1 the plain face,
+ * 0..3 the rings from the 50 outwards, 4/5 the left and right pockets.
+ */
+export interface Region {
+  id: number;
+  points: number;
+  /** Centre of the cup, for its lip. */
+  cx: number;
+  cu: number;
+}
+
+export const FACE: Region = { id: -1, points: 10, cx: 0, cu: 0 };
+
+export function regionAt(x: number, u: number): Region {
+  for (let i = 0; i < 2; i++) {
+    const cx = (i === 0 ? -1 : 1) * LANE.pocketX;
+    const dx = x - cx;
+    const du = u - LANE.pocketU;
+    if (dx * dx + du * du <= LANE.pocketR * LANE.pocketR) return { id: 4 + i, points: 100, cx, cu: LANE.pocketU };
+  }
+  const du = u - LANE.ringU;
+  const d = Math.sqrt(x * x + du * du);
+  for (let i = 0; i < RINGS.length; i++) {
+    const ring = RINGS[i]!;
+    if (d <= ring.r) return { id: i, points: ring.points, cx: 0, cu: LANE.ringU };
+  }
+  return FACE;
+}
+
+/** Points for a spot on the board face: which cup it is over, 10 on the plain face, 0 off the board. */
 export function scoreAt(x: number, u: number): number {
   if (u < 0 || u > LANE.boardLength || Math.abs(x) > LANE.boardHalfWidth) return 0;
-  for (const sx of [-LANE.pocketX, LANE.pocketX]) {
-    const dx = x - sx;
-    const du = u - LANE.pocketU;
-    if (dx * dx + du * du <= LANE.pocketR * LANE.pocketR) return 100;
-  }
-  const dx = x;
-  const du = u - LANE.ringU;
-  const d = Math.sqrt(dx * dx + du * du);
-  for (const ring of RINGS) if (d <= ring.r) return ring.points;
-  return 10;
+  return regionAt(x, u).points;
 }
 
 function newBall(id: number): BallState {
-  return { id, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, status: 'racked', frozen: true, onBumper: false, hops: 0, grace: [], launchTick: -1, points: 0 };
+  return { id, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, u: 0, vu: 0, age: 0, status: 'racked', frozen: true, onBumper: false, hops: 0, grace: [], launchTick: -1, points: 0 };
 }
 
 export function createTable(): TableState {
@@ -210,7 +266,7 @@ export function tablesMatch(a: TableState, b: TableState, eps = 1e-6): boolean {
     const p = a.balls[i]!;
     const q = b.balls[i]!;
     if (p.id !== q.id || p.status !== q.status || p.frozen !== q.frozen || p.points !== q.points) return false;
-    for (const k of ['x', 'y', 'z', 'vx', 'vy', 'vz'] as const) if (Math.abs(p[k] - q[k]) > eps) return false;
+    for (const k of ['x', 'y', 'z', 'vx', 'vy', 'vz', 'u', 'vu'] as const) if (Math.abs(p[k] - q[k]) > eps) return false;
   }
   return true;
 }
@@ -261,7 +317,7 @@ export function tableScore(t: TableState): number {
 }
 
 export function tableBusy(t: TableState): boolean {
-  return t.balls.some((b) => b.status === 'rolling' || b.status === 'flying');
+  return t.balls.some((b) => b.status === 'rolling' || b.status === 'flying' || b.status === 'board');
 }
 
 /** Advance the table by one step. */
@@ -277,6 +333,10 @@ export function stepTable(t: TableState, events: TableEvent[]): void {
   for (const b of balls) {
     if (b.status === 'flying') {
       stepFlight(b, tick, dt, events);
+      continue;
+    }
+    if (b.status === 'board') {
+      stepBoard(b, tick, dt, events);
       continue;
     }
     if (!onLane(b) || b.frozen) continue;
@@ -427,9 +487,9 @@ function stepFlight(b: BallState, tick: number, dt: number, events: TableEvent[]
     const nY = -LANE.boardSin;
     const nZ = LANE.boardCos;
     const vn = b.vy * nY + b.vz * nZ; // < 0 when moving into the board
-    if (vn < 0 && -vn > P.hopSpeed && b.hops === 0) {
-      // Too hard: hop off the face once, then it'll settle wherever it comes down.
-      b.hops = 1;
+    if (vn < 0 && -vn > P.hopSpeed) {
+      // Hard enough to bounce: hop off the face, then come down again a little lower.
+      b.hops += 1;
       const tvx = b.vx * P.hopTangentKeep;
       const tvy = (b.vy - vn * nY) * P.hopTangentKeep;
       const tvz = (b.vz - vn * nZ) * P.hopTangentKeep;
@@ -444,12 +504,114 @@ function stepFlight(b: BallState, tick: number, dt: number, events: TableEvent[]
       return;
     }
     if (u > LANE.boardLength) return finish(b, tick, 0, events, 'over');
-    const points = scoreAt(b.x, Math.max(0, u));
-    return finish(b, tick, points, events, undefined, Math.max(0, u));
+    // Landed: keep what was moving along the face and start rolling.
+    b.status = 'board';
+    b.age = 0;
+    b.u = Math.max(0, u);
+    b.vu = (b.vy * LANE.boardCos + b.vz * LANE.boardSin) * P.landKeep;
+    b.vx *= P.landKeep;
+    placeOnBoard(b);
+    events.push({ tick, type: 'land', ball: b.id, x: b.x, y: b.y, z: b.z, u: b.u });
+    return;
   }
 
   // Down on the floor: the whole pit between ramp and board drains into the 10 trough.
   if (b.z <= 0) return finish(b, tick, 10, events, undefined, 0);
+}
+
+/** World position of a ball sitting on the face at (x, u). */
+function placeOnBoard(b: BallState): void {
+  const R = PHYSICS.ballRadius;
+  b.y = LANE.boardBaseY + b.u * LANE.boardCos - R * LANE.boardSin;
+  b.z = b.u * LANE.boardSin + R * LANE.boardCos;
+  b.vy = b.vu * LANE.boardCos;
+  b.vz = b.vu * LANE.boardSin;
+}
+
+/**
+ * Rolling on the board: a slope with raised cups. Gravity pulls the ball back
+ * down the face; each cup has a lip that takes some speed to climb (more to
+ * climb out), and a ball slow enough inside a cup drops in and scores it. Too
+ * fast over a lip and it skips the cup. Off the foot of the board is the 10
+ * trough; off the top is the net.
+ */
+function stepBoard(b: BallState, tick: number, dt: number, events: TableEvent[]): void {
+  const P = PHYSICS;
+  const before = regionAt(b.x, b.u);
+  b.age += 1;
+
+  b.vu -= P.gravity * LANE.boardSin * dt;
+  const speed = Math.sqrt(b.vx * b.vx + b.vu * b.vu);
+  if (speed > 1e-6) {
+    const drag = (P.faceFriction + (before.id >= 0 ? P.cupDrag : 0)) * dt;
+    const k = Math.max(0, 1 - drag / speed);
+    b.vx *= k;
+    b.vu *= k;
+  }
+  b.x += b.vx * dt;
+  b.u += b.vu * dt;
+
+  const wallX = LANE.boardHalfWidth - P.ballRadius;
+  if (b.x > wallX) {
+    b.x = wallX - (b.x - wallX);
+    b.vx = -Math.abs(b.vx) * P.boardWallRestitution;
+    events.push({ tick, type: 'wall', ball: b.id, x: b.x, y: b.y, z: b.z });
+  } else if (b.x < -wallX) {
+    b.x = -wallX + (-wallX - b.x);
+    b.vx = Math.abs(b.vx) * P.boardWallRestitution;
+    events.push({ tick, type: 'wall', ball: b.id, x: b.x, y: b.y, z: b.z });
+  }
+
+  if (b.u < 0) {
+    b.u = 0;
+    placeOnBoard(b);
+    return finish(b, tick, 10, events, undefined, 0);
+  }
+  if (b.u > LANE.boardLength) {
+    placeOnBoard(b);
+    return finish(b, tick, 0, events, 'over');
+  }
+
+  const after = regionAt(b.x, b.u);
+  if (after.id !== before.id) {
+    // Crossing a lip: the cup being entered or left.
+    const cup = after.id >= 0 ? after : before;
+    const entering = before.id < 0 || (after.id >= 0 && after.id < before.id);
+    let nx = b.x - cup.cx;
+    let nu = b.u - cup.cu;
+    const len = Math.sqrt(nx * nx + nu * nu) || 1;
+    nx /= len;
+    nu /= len;
+    const vr = b.vx * nx + b.vu * nu; // outward speed
+    const need = entering ? P.lipSpeed : P.escapeSpeed;
+    if (Math.abs(vr) < need) {
+      // Not enough to climb the lip: bounce off it, sitting just back on its own side.
+      const lipR = cup.id >= 4 ? LANE.pocketR : RINGS[cup.id]!.r;
+      const side = entering ? lipR + 0.01 : lipR - 0.01;
+      b.x = cup.cx + nx * side;
+      b.u = cup.cu + nu * side;
+      b.vx -= (1 + P.lipRestitution) * vr * nx;
+      b.vu -= (1 + P.lipRestitution) * vr * nu;
+      placeOnBoard(b);
+      events.push({ tick, type: 'lip', ball: b.id, x: b.x, y: b.y, z: b.z, u: b.u, points: cup.points });
+      return;
+    }
+    if (after.id >= 0 && Math.abs(vr) < P.skipSpeed) {
+      placeOnBoard(b);
+      return finish(b, tick, after.points, events, undefined, b.u);
+    }
+    // Over it in one bound, losing a little speed.
+    b.vx *= P.skipDamping;
+    b.vu *= P.skipDamping;
+    if (after.id >= 0) events.push({ tick, type: 'skip', ball: b.id, x: b.x, y: b.y, z: b.z, u: b.u, points: after.points });
+  }
+
+  placeOnBoard(b);
+  if (after.id >= 0 && Math.sqrt(b.vx * b.vx + b.vu * b.vu) < P.captureSpeed) {
+    return finish(b, tick, after.points, events, undefined, b.u);
+  }
+  // Wedged somewhere for ten seconds: the attendant knocks it in.
+  if (b.age > 1200) return finish(b, tick, after.points, events, undefined, b.u);
 }
 
 function finish(b: BallState, tick: number, points: number, events: TableEvent[], reason?: 'over', u?: number): void {
@@ -458,6 +620,7 @@ function finish(b: BallState, tick: number, points: number, events: TableEvent[]
   b.vx = 0;
   b.vy = 0;
   b.vz = 0;
+  b.vu = 0;
   if (points > 0) events.push({ tick, type: 'score', ball: b.id, x: b.x, y: b.y, z: b.z, points, u });
   else events.push({ tick, type: 'miss', ball: b.id, x: b.x, y: b.y, z: b.z, reason });
 }

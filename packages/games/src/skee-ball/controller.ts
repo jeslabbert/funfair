@@ -38,6 +38,8 @@ const LABEL_MS = 650;
 const SINK_MS = 380;
 const MISS_MS = 450;
 const FLASH_MS = 600;
+/** Width of a cup's raised lip, in world units. */
+const LIP_WIDTH = 0.12;
 /** How far back the lane's perspective reaches: larger = flatter. */
 const PERSPECTIVE = 8;
 /** Vertical pixels per world unit of height, as a fraction of the lane's unit size. */
@@ -150,6 +152,7 @@ export function mountSkeeBallController(
   const spin2d = new Map<number, { spin: number; dirX: number; dirY: number }>();
   const prevPos = new Map<number, { x: number; y: number; z: number }>();
   const trails = new Map<number, { x: number; y: number; z: number }[]>();
+  const lastLipAt = new Map<number, number>();
   const ball3d = createBallRenderer();
 
   const ro = new ResizeObserver(() => resize());
@@ -307,8 +310,23 @@ export function mountSkeeBallController(
         buzz(12);
         break;
       case 'hop':
-        labels.push({ text: 'too hard!', color: '#ffb547', x: ev.x, y: ev.y, z: ev.z, at: now });
+        labels.push({ text: 'bounce!', color: '#ffb547', x: ev.x, y: ev.y, z: ev.z, at: now });
         buzz(10);
+        break;
+      case 'land':
+        buzz(8);
+        break;
+      case 'lip': {
+        const last = lastLipAt.get(ev.ball) ?? -Infinity;
+        if (now - last > 350) {
+          labels.push({ text: 'lip!', color: pointColor(ev.points ?? 10), x: ev.x, y: ev.y, z: ev.z, at: now });
+          buzz(6);
+        }
+        lastLipAt.set(ev.ball, now);
+        break;
+      }
+      case 'skip':
+        labels.push({ text: 'skipped', color: 'rgba(255,255,255,0.8)', x: ev.x, y: ev.y, z: ev.z, at: now });
         break;
       case 'rail':
       case 'bumper':
@@ -338,7 +356,7 @@ export function mountSkeeBallController(
   function updateSpins() {
     if (!pred.state) return;
     for (const b of pred.state.balls) {
-      if (b.status !== 'rolling' && b.status !== 'resting' && b.status !== 'flying') {
+      if (b.status !== 'rolling' && b.status !== 'resting' && b.status !== 'flying' && b.status !== 'board') {
         prevPos.delete(b.id);
         continue;
       }
@@ -462,66 +480,65 @@ export function mountSkeeBallController(
       ctx.fillText('10', p.x, p.y);
     }
 
-    // Rings, largest first
+    // Cups: each ring is a raised lip around a dark opening, largest first
     const fresh = (points: number, x: number) => {
       const f = flashes.find((k) => k.points === points && (points !== 100 || Math.sign(k.x) === Math.sign(x)));
       return f ? 1 - clamp((now - f.at) / FLASH_MS, 0, 1) : 0;
     };
-    const ringC = facePt(0, LANE.ringU);
-    for (let i = RINGS.length - 1; i >= 0; i--) {
-      const ring = RINGS[i]!;
-      const { rx, ry } = faceRadii(0, LANE.ringU, ring.r);
-      ctx.beginPath();
-      ctx.ellipse(ringC.x, ringC.y, rx, ry, 0, 0, Math.PI * 2);
-      const flash = fresh(ring.points, 0);
-      ctx.fillStyle = shade(pointColor(ring.points), i % 2 === 0 ? -0.15 : -0.35);
-      ctx.fill();
-      if (flash > 0) {
-        ctx.fillStyle = `rgba(255,255,255,${0.6 * flash})`;
-        ctx.fill();
-      }
-      ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      // Score label: on the ring's lower band, or above the hole for the 50
-      const outerR = ring.r;
-      const innerR = i > 0 ? RINGS[i - 1]!.r : RINGS[0]!.r * 0.45;
-      const bandPx = ((outerR - innerR) * ry) / outerR;
-      const lp = facePt(0, i === 0 ? LANE.ringU + (outerR + innerR) / 2 : LANE.ringU - (outerR + innerR) / 2);
-      ctx.fillStyle = 'rgba(0,0,0,0.75)';
-      ctx.font = `800 ${Math.max(8, Math.min(W * 0.034, bandPx * 0.95))}px system-ui, sans-serif`;
-      ctx.fillText(String(ring.points), lp.x, lp.y);
-    }
-    // Hole in the middle of the 50
-    {
-      const { rx, ry } = faceRadii(0, LANE.ringU, RINGS[0]!.r * 0.45);
-      ctx.beginPath();
-      ctx.ellipse(ringC.x, ringC.y, rx, ry, 0, 0, Math.PI * 2);
-      ctx.fillStyle = '#0a0612';
-      ctx.fill();
-    }
-
-    // Corner pockets
-    for (const side of [-1, 1]) {
-      const c = facePt(side * LANE.pocketX, LANE.pocketU);
-      const { rx, ry } = faceRadii(side * LANE.pocketX, LANE.pocketU, LANE.pocketR);
-      const flash = fresh(100, side);
-      ctx.beginPath();
-      ctx.ellipse(c.x, c.y, rx * 1.35, ry * 1.35, 0, 0, Math.PI * 2);
-      ctx.fillStyle = pointColor(100);
-      ctx.fill();
-      if (flash > 0) {
-        ctx.fillStyle = `rgba(255,255,255,${0.7 * flash})`;
-        ctx.fill();
-      }
+    const cup = (x: number, u: number, r: number, points: number, label: string, labelU: number) => {
+      const c = facePt(x, u);
+      const { rx, ry } = faceRadii(x, u, r);
+      const lipRx = rx * (LIP_WIDTH / r);
+      const lipRy = ry * (LIP_WIDTH / r);
+      const color = pointColor(points);
+      // Lip: lit along the top, in shadow along the bottom
       ctx.beginPath();
       ctx.ellipse(c.x, c.y, rx, ry, 0, 0, Math.PI * 2);
-      ctx.fillStyle = '#0a0612';
+      const lg = ctx.createLinearGradient(0, c.y - ry, 0, c.y + ry);
+      lg.addColorStop(0, shade(color, 0.3));
+      lg.addColorStop(0.5, color);
+      lg.addColorStop(1, shade(color, -0.45));
+      ctx.fillStyle = lg;
       ctx.fill();
-      ctx.fillStyle = '#3a2a00';
-      ctx.font = `900 ${Math.max(8, Math.min(W * 0.028, ry * 1.6))}px system-ui, sans-serif`;
-      ctx.fillText('100', c.x, c.y + ry * 2.1);
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      // Shadow the lip throws down the face
+      ctx.beginPath();
+      ctx.ellipse(c.x, c.y + lipRy * 0.8, rx, ry, 0, 0, Math.PI);
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.fill();
+      // Opening
+      ctx.beginPath();
+      ctx.ellipse(c.x, c.y, rx - lipRx, ry - lipRy, 0, 0, Math.PI * 2);
+      ctx.fillStyle = '#0b0714';
+      ctx.fill();
+      // Lit far wall inside
+      ctx.save();
+      ctx.clip();
+      ctx.beginPath();
+      ctx.ellipse(c.x, c.y - ry * 0.35, (rx - lipRx) * 0.95, (ry - lipRy) * 0.95, 0, 0, Math.PI * 2);
+      ctx.fillStyle = hexToRgba(shade(color, -0.6), 0.6);
+      ctx.fill();
+      ctx.restore();
+      const flash = fresh(points, x);
+      if (flash > 0) {
+        ctx.beginPath();
+        ctx.ellipse(c.x, c.y, rx, ry, 0, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${0.55 * flash})`;
+        ctx.fill();
+      }
+      const lp = facePt(x, labelU);
+      ctx.fillStyle = color;
+      ctx.font = `800 ${Math.max(8, Math.min(W * 0.032, lipRy * 3.2))}px system-ui, sans-serif`;
+      ctx.fillText(label, lp.x, lp.y);
+    };
+    for (let i = RINGS.length - 1; i >= 0; i--) {
+      const ring = RINGS[i]!;
+      const inner = i > 0 ? RINGS[i - 1]!.r : 0;
+      cup(0, LANE.ringU, ring.r, ring.points, String(ring.points), i === 0 ? LANE.ringU : LANE.ringU - (ring.r + inner) / 2 + LIP_WIDTH / 2);
     }
+    for (const side of [-1, 1]) cup(side * LANE.pocketX, LANE.pocketU, LANE.pocketR, 100, '100', LANE.pocketU - LANE.pocketR - 0.28);
     flashes = flashes.filter((k) => now - k.at < FLASH_MS);
   }
 
@@ -655,6 +672,12 @@ export function mountSkeeBallController(
         continue;
       }
       const p = project(b.x, b.y, b.z);
+      if (b.status === 'board') {
+        // On the face: its shadow sits on the face just below it.
+        const f = facePt(b.x, b.u);
+        out.push({ id: b.id, x: p.x, y: p.y, gx: f.x, gy: f.y, height: 0, r: ballPx(p.unit), alpha: 1, dim: 0, lifted: false });
+        continue;
+      }
       out.push({ id: b.id, x: p.x, y: p.y, gx: p.gx, gy: p.gy, height: clamp(b.z / 2, 0, 1), r: ballPx(p.unit), alpha: 1, dim: 0, lifted: false });
     }
     sinks = sinks.filter((k) => now - k.at < SINK_MS);
@@ -744,7 +767,7 @@ export function mountSkeeBallController(
   function drawBalls(now: number) {
     const color = me?.color ?? '#fff';
     const list = poses(now).sort((a, b) => a.gy - b.gy);
-    if (pred.state) for (const b of pred.state.balls) if (b.status === 'rolling' || b.status === 'flying') drawTrail(b, color);
+    if (pred.state) for (const b of pred.state.balls) if (b.status === 'rolling' || b.status === 'flying' || b.status === 'board') drawTrail(b, color);
     for (const pose of list) {
       const lift = pose.lifted ? 1 : pose.height;
       // Contact shadow, drifting off and softening as the ball rises
