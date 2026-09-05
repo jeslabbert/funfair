@@ -23,6 +23,7 @@ import {
   GROUND,
   MeshBuilder,
   createScene,
+  sceneError,
   framePoint,
   hexToRgbTuple,
   mat4Compose,
@@ -173,6 +174,9 @@ export function mountSkeeBallController(
   const hintEl = root.querySelector<HTMLElement>('.skb-ctl-hint')!;
   const ctx = canvas.getContext('2d')!;
   const scene = createScene(glCanvas);
+  /** Anything that stops the 3D scene from drawing, shown on the overlay. */
+  let problem = scene ? '' : sceneError || 'WebGL is not available';
+  let framesDrawn = 0;
 
   let state: SkeeBallPlayerState | null = null;
   let me: PlayerInfo | null = null;
@@ -453,16 +457,26 @@ export function mountSkeeBallController(
     ctx.clearRect(0, 0, W, H);
     advanceLocal(now);
     updateMotion(dt);
-    if (scene && table && viewProj) {
-      scene.begin(viewProj, CAMERA_EYE, LIGHT);
-      scene.draw(table, mat4Compose([0, 0, 0], QUAT_IDENTITY, 1));
-      drawBalls3D(now);
-      drawFlashes(now);
-    } else {
-      ctx.fillStyle = 'rgba(255,255,255,0.7)';
-      ctx.font = `600 ${Math.max(14, W * 0.04)}px system-ui, sans-serif`;
+    if (scene && table && viewProj && !problem) {
+      try {
+        scene.begin(viewProj, CAMERA_EYE, LIGHT);
+        scene.draw(table, mat4Compose([0, 0, 0], QUAT_IDENTITY, 1));
+        drawBalls3D(now);
+        drawFlashes(now);
+        if (framesDrawn++ < 3) {
+          const err = scene.error();
+          if (err) problem = err;
+        }
+      } catch (e) {
+        problem = `Render failed: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+    if (problem) {
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.font = `600 ${Math.max(13, W * 0.036)}px system-ui, sans-serif`;
       ctx.textAlign = 'center';
-      ctx.fillText('This game needs WebGL', W / 2, H / 2);
+      ctx.textBaseline = 'middle';
+      wrapText(ctx, `3D view unavailable · ${problem}`, W / 2, H * 0.45, W * 0.85, Math.max(16, W * 0.045));
     }
     drawCupLabels();
     drawHint(now);
@@ -777,6 +791,21 @@ export function mountSkeeBallController(
       root.innerHTML = '';
     },
   };
+}
+
+function wrapText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number) {
+  const words = text.split(' ');
+  let line = '';
+  let yy = y;
+  for (const w of words) {
+    const next = line ? `${line} ${w}` : w;
+    if (ctx.measureText(next).width > maxWidth && line) {
+      ctx.fillText(line, x, yy);
+      line = w;
+      yy += lineHeight;
+    } else line = next;
+  }
+  if (line) ctx.fillText(line, x, yy);
 }
 
 // ---- the table geometry -----------------------------------------------------
