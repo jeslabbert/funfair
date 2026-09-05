@@ -44,6 +44,7 @@ PWA experience).
 ```
 packages/shared   Protocol + game contracts shared by server and browser
 packages/games    One folder per game: rules, server instance, host view, phone view
+                  + lockstep/ (shared rewind/prediction netcode) and render/ (sphere, flick, canvas helpers)
 apps/server       Node + ws: rooms, sessions, reconnects, the game loop, static hosting
 apps/web          Vite app: / = host screen, /play/ = phone controller (PWA), /practice/ = solo range
 ```
@@ -150,9 +151,37 @@ can be unit-tested with `node:test` (`pnpm test`).
   (`POWER_SCALE`) and half swipe length (`DISTANCE_SCALE`). Expect to tweak those two,
   `lipSpeed` and `captureSpeed` after a round on real phones.
 
+## Skee-Ball Alley
+
+- Nine balls each, sixty seconds. The phone shows a lane in perspective: a **tray of balls**
+  under the lane, the run-up (drag a ball anywhere up to the dashed line before you let
+  go), the **jump ramp** at the end, a pit, and the **ring board** tilted back behind it.
+  Land on the board for 10, in the rings for 20/30/40/50, or in one of the two top-corner
+  **pockets for 100**. The pit between ramp and board drains into the 10 trough; over the
+  top of the board is a miss.
+- Same feel as the Derby: grab, drag, flick. The lane leans back so a weak roll comes back
+  to the bumper and stays where it settles (grab it again); a ball that reaches the ramp
+  faster than `minJumpSpeed` takes off at 52°, and where it comes down on the face is the
+  score. Hit the face harder than `hopSpeed` and it **hops once** before it lands, so the
+  hardest throw is not the best throw. Balls in flight bounce off the cabinet walls, so
+  angled throws can find the pockets.
+- Everything is the same deterministic lockstep table as the Derby (`lockstep/`): the phone
+  predicts, the server rewinds, both step at 120 Hz with arithmetic and sqrt only. Flight
+  is plain ballistics (`gravity`), the board is a plane at `boardBaseY` tilted by
+  `boardCos/boardSin`, and scoring is `scoreAt(x, u)` with `u` measured up the face.
+- The big screen shows one card per player: score, ball pips, and a top-down board with a
+  dot for every landing (a cross above it for a miss), sorted by standing, plus a feed and
+  the round clock. Round ends when the clock runs out or everyone is out of balls; highest
+  total wins.
+- Tuning: `LANE` (geometry: `placeMaxY`, `rampY`, `boardBaseY`, ring/pocket layout), `RINGS`,
+  `PHYSICS` (`slope`, `friction`, `minJumpSpeed`, `rampKeep`, `gravity`, `hopSpeed`,
+  `maxLaunchSpeed`), `BALLS_PER_PLAYER` and `ROUND_MS`, all in `skee-ball/logic.ts`. A
+  straight throw from the bumper climbs the ladder 10 → 20 → 30 → 40 → 50 over flick
+  power 0.65 → 0.9 and hops past that.
+
 ## Roadmap
 
-- More games: skee ball, hoops, …
+- More games: hoops, …
 - Sound on the host screen, a little more juice (confetti, crowd noise).
 - Match-long scoreboard across several games.
 - Deploy recipe (single container, TLS) for playing away from home.

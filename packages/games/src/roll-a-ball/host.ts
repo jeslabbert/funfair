@@ -1,7 +1,7 @@
 import type { PlayerInfo } from '@funfair/shared';
 import type { HostView } from '@funfair/shared/client';
 import { ZONE_LABEL, type FeedEntry, type RollABallHostState } from './logic';
-import { fitFont } from './controller';
+import { escapeHtml, fitFont, hexToRgba, truncate } from '../render/util';
 
 const LERP_RATE = 7; // higher = snappier catch-up to the server position
 
@@ -237,18 +237,4 @@ function drawCheckers(ctx: CanvasRenderingContext2D, x: number, y: number, w: nu
       ctx.fillRect(x + c * cell, y + r * cell, cell, Math.min(cell, y + h - (y + r * cell)));
     }
   }
-}
-
-function hexToRgba(hex: string, a: number): string {
-  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
-  if (!m) return `rgba(255,255,255,${a})`;
-  return `rgba(${parseInt(m[1]!, 16)},${parseInt(m[2]!, 16)},${parseInt(m[3]!, 16)},${a})`;
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n - 1) + '…' : s;
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }

@@ -665,6 +665,18 @@ function removeFrom(list: number[], v: number): void {
   if (i >= 0) list.splice(i, 1);
 }
 
+/** The table as a lockstep simulation: one rules object for the server and the phone. */
+export const tableRules = {
+  stepMs: PHYSICS.stepMs,
+  step: stepTable,
+  clone: cloneTable,
+  match: tablesMatch,
+  apply(t: TableState, input: RollABallInput): void {
+    if (input.type === 'grab') grabBall(t, input.ball);
+    else launchBall(t, input);
+  },
+};
+
 /** True while any ball is rolling (or waiting in the chute). */
 export function tableBusy(t: TableState): boolean {
   return t.balls.some((b) => b.status === 'rolling' || b.status === 'returning');

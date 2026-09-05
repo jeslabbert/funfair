@@ -7,6 +7,8 @@ export interface GameMeta {
   tagline: string;
   minPlayers: number;
   maxPlayers: number;
+  /** Per-game option keys the game understands (see GameContext.options), e.g. 'obstacles'. */
+  options?: readonly string[];
 }
 
 /** What the server hands a game when it starts. */
