@@ -83,9 +83,9 @@ const BOARD: Frame = {
   en: [0, -LANE.boardSin, LANE.boardCos],
 };
 const CAMERA_EYE: Vec3 = [0, -13.5, 9.0];
-const CAMERA_TARGET: Vec3 = [0, 6.2, -0.2];
+const CAMERA_TARGET: Vec3 = [0, 6.2, 0.1];
 /** Half of the horizontal field of view. */
-const HALF_HFOV = (12.4 * Math.PI) / 180;
+const HALF_HFOV = (11.8 * Math.PI) / 180;
 const LIGHT: Vec3 = [-0.35, -0.5, 0.78];
 
 interface Drag {
