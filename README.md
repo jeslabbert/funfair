@@ -167,14 +167,14 @@ can be unit-tested with `node:test` (`pnpm test`).
   the countdown) is drawn on a 2D overlay.
 - Same feel as the Derby: grab, drag, flick. The lane leans back so a weak roll comes back
   to the bumper and stays where it settles (grab it again); a ball that reaches the ramp
-  faster than `minJumpSpeed` takes off at 52° and flies (plain ballistics, bouncing off the
+  faster than `minJumpSpeed` takes off at 37° and flies (plain ballistics, bouncing off the
   cabinet walls).
 - **The board is simulated too.** Hitting the face harder than `hopSpeed` makes the ball
   **bounce** (it comes down again a little lower); then it **rolls on the face**, which is
-  a 35° slope, so gravity pulls it back down towards the trough. Every cup has a lip: it
+  a 25° slope, so gravity pulls it back down towards the trough. Every cup has a lip: it
   takes `lipSpeed` towards a cup to climb in and `escapeSpeed` to climb back out, so a ball
   rattles around inside a cup, bouncing off the lip, until it is slower than
-  `captureSpeed` and drops in – or it climbs out and tumbles down into the next cup or the
+  `captureSpeed` (and has been on the board for `settleTicks`, so it always rolls first) and drops in – or it climbs out and tumbles down into the next cup or the
   trough. Faster than `skipSpeed` over a lip and the ball skips the cup. A ball that lands
   above the rings rolls down into the 20 (or a pocket) rather than scoring where it
   touched.
@@ -190,8 +190,8 @@ can be unit-tested with `node:test` (`pnpm test`).
   flight: `gravity`, `hopSpeed`, `hopRestitution`; board: `faceFriction`, `cupDrag`,
   `lipSpeed`, `escapeSpeed`, `skipSpeed`, `captureSpeed`, `lipRestitution`, `skipDamping`),
   `BALLS_PER_PLAYER` and `ROUND_MS`, all in `skee-ball/logic.ts`. A straight throw from the
-  bumper climbs 10 → 20 → 30 → 40 over flick power 0.75 → 0.9, then lands high and rolls
-  back down into the 40 or 30; the 50 and the pockets take a touch of angle or luck.
+  bumper climbs 10 → 20 → 30 → 50 over flick power 0.65 → 0.85, lands high and rolls back
+  into the 30 around 0.9, and sails over the top at full power; the pockets take angle.
 
 ## Roadmap
 

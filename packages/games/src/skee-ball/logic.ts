@@ -26,26 +26,26 @@ export const LANE = {
   rampY: 8.0,
   /** …and launches the ball from here. */
   launchY: 8.8,
-  /** The ring board's base and tilt (35° up from the floor). */
+  /** The ring board's base and tilt (25° up from the floor: shallow enough to roll on). */
   boardBaseY: 11.6,
-  boardCos: 0.8191520442889918,
-  boardSin: 0.573576436351046,
+  boardCos: 0.9063077870366499,
+  boardSin: 0.42261826174069944,
   boardHalfWidth: 2.3,
   /** Height of the board along its face. */
-  boardLength: 4.2,
+  boardLength: 4.6,
   /** Ring centre along the board face. */
-  ringU: 2.2,
+  ringU: 2.3,
   /** Corner pockets. */
-  pocketU: 3.6,
-  pocketX: 1.55,
-  pocketR: 0.32,
+  pocketU: 3.9,
+  pocketX: 1.75,
+  pocketR: 0.34,
 } as const;
 
 export const RINGS = [
-  { points: 50, r: 0.34 },
-  { points: 40, r: 0.7 },
-  { points: 30, r: 1.1 },
-  { points: 20, r: 1.55 },
+  { points: 50, r: 0.5 },
+  { points: 40, r: 0.92 },
+  { points: 30, r: 1.32 },
+  { points: 20, r: 1.72 },
 ] as const;
 
 export const PHYSICS = {
@@ -60,31 +60,33 @@ export const PHYSICS = {
   maxLateralRatio: 0.45,
   /** Slower than this at the ramp and the ball just rolls back. */
   minJumpSpeed: 2.0,
-  /** Launch angle: sin/cos of 52°. */
-  jumpSin: 0.788010753606722,
-  jumpCos: 0.6156614753256583,
+  /** Launch angle: sin/cos of 37°, flat enough to arrive rolling. */
+  jumpSin: 0.6018150231520483,
+  jumpCos: 0.7986355100472928,
   /** Speed kept over the ramp. */
   rampKeep: 0.85,
   gravity: 16,
   /** Faster than this into the board and the ball bounces before it lands. */
   hopSpeed: 3,
   hopRestitution: 0.4,
-  hopTangentKeep: 0.75,
+  hopTangentKeep: 0.9,
   wallRestitution: 0.5,
   /** Speed along the face kept when the ball lands and starts rolling. */
-  landKeep: 0.6,
+  landKeep: 0.9,
   /** Rolling on the board: friction on the face, and extra drag rattling around inside a cup. */
-  faceFriction: 1.4,
-  cupDrag: 0.8,
+  faceFriction: 0.8,
+  cupDrag: 0.5,
   /** Climbing a cup's lip from the face needs this much speed towards it… */
   lipSpeed: 1.0,
   /** …and climbing out of a cup needs this much. */
   escapeSpeed: 2.8,
   /** Faster than this over a lip and the ball skips the cup entirely. */
   skipSpeed: 4.2,
-  /** Slower than this inside a cup and the ball drops in. */
-  captureSpeed: 0.6,
-  lipRestitution: 0.55,
+  /** Slower than this inside a cup and the ball drops in… */
+  captureSpeed: 0.55,
+  /** …once it has been on the board this many steps (a ball always rolls or rattles first). */
+  settleTicks: 36,
+  lipRestitution: 0.6,
   skipDamping: 0.82,
   boardWallRestitution: 0.5,
   stepMs: 1000 / 120,
@@ -607,7 +609,7 @@ function stepBoard(b: BallState, tick: number, dt: number, events: TableEvent[])
   }
 
   placeOnBoard(b);
-  if (after.id >= 0 && Math.sqrt(b.vx * b.vx + b.vu * b.vu) < P.captureSpeed) {
+  if (after.id >= 0 && b.age >= P.settleTicks && Math.sqrt(b.vx * b.vx + b.vu * b.vu) < P.captureSpeed) {
     return finish(b, tick, after.points, events, undefined, b.u);
   }
   // Wedged somewhere for ten seconds: the attendant knocks it in.

@@ -59,9 +59,9 @@ function throwBall(power: number, lateral = 0) {
 
 test('the board scores by ring, pocket and pit', () => {
   assert.equal(scoreAt(0, LANE.ringU), 50);
-  assert.equal(scoreAt(0.5, LANE.ringU), 40);
-  assert.equal(scoreAt(0.9, LANE.ringU), 30);
-  assert.equal(scoreAt(0, LANE.ringU + 1.3), 20);
+  assert.equal(scoreAt(0.7, LANE.ringU), 40);
+  assert.equal(scoreAt(1.1, LANE.ringU), 30);
+  assert.equal(scoreAt(0, LANE.ringU + 1.6), 20);
   assert.equal(scoreAt(2.0, 0.5), 10);
   assert.equal(scoreAt(LANE.pocketX, LANE.pocketU), 100);
   assert.equal(scoreAt(-LANE.pocketX + 0.1, LANE.pocketU - 0.1), 100);
@@ -106,7 +106,7 @@ test('a weak roll never reaches the ramp and comes back to the bumper', () => {
 
 test('power climbs the rings: pit, then 10 through 50', () => {
   const ladder = [0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9].map((p) => throwBall(p).end?.points ?? -1);
-  assert.deepEqual(ladder, [10, 10, 10, 10, 10, 20, 30, 40]);
+  assert.deepEqual(ladder, [10, 10, 10, 20, 30, 50, 50, 30]);
   const flight = throwBall(0.85);
   assert.ok(flight.events.some((e) => e.type === 'jump'), 'it left the ramp');
   const jumpAt = flight.events.find((e) => e.type === 'jump')!.tick;
@@ -115,7 +115,7 @@ test('power climbs the rings: pit, then 10 through 50', () => {
   assert.ok(landAt > jumpAt + 10, 'and flew for a while');
   assert.ok(scoreAt > landAt, 'then rolled on the board before it dropped in');
   assert.equal(flight.ball.status, 'done');
-  assert.equal(flight.ball.points, 30);
+  assert.equal(flight.ball.points, 50);
 });
 
 test('a ball rolls on the board: it bounces off lips, rattles in a cup and drops in', () => {
@@ -146,11 +146,14 @@ test('a ball rolls on the board: it bounces off lips, rattles in a cup and drops
   assert.equal(ev2.find((e) => e.type === 'score')?.u, 0);
 });
 
-test('a hard throw bounces off the face and still counts where it ends up', () => {
-  const r = throwBall(1);
+test('a hard throw bounces off the face; full power sails over the top', () => {
+  const r = throwBall(0.9);
   assert.ok(r.events.some((e) => e.type === 'hop'));
   assert.ok(r.events.some((e) => e.type === 'land'));
   assert.ok(r.end && r.end.type === 'score' && r.end.points! >= 10);
+  const over = throwBall(1);
+  assert.ok(over.end && over.end.type === 'miss' && over.end.reason === 'over');
+  assert.equal(over.ball.points, 0);
 });
 
 test('an angled throw can find the corner pockets or bounce off the walls', () => {
@@ -198,8 +201,8 @@ test('the round scores as balls land and ends when everyone is out of balls', ()
   assert.ok(host.raceMs < ROUND_MS);
   const a = host.racers.find((r) => r.playerId === 'a')!;
   const b = host.racers.find((r) => r.playerId === 'b')!;
-  assert.equal(a.score, 30 * BALLS_PER_PLAYER);
-  assert.equal(b.score, 10 * BALLS_PER_PLAYER);
+  assert.equal(a.score, 50 * BALLS_PER_PLAYER);
+  assert.equal(b.score, 20 * BALLS_PER_PLAYER);
   assert.equal(a.ballsLeft, 0);
   assert.equal(a.landings.length, BALLS_PER_PLAYER);
   assert.equal(host.winnerId, 'a');
@@ -208,7 +211,7 @@ test('the round scores as balls land and ends when everyone is out of balls', ()
   advance(FINISH_LINGER_MS);
   assert.equal(game.isFinished(), true);
   assert.deepEqual(game.results().standings.map((s) => s.playerId), ['a', 'b']);
-  assert.match(game.results().standings[0]!.label, /270 pts/);
+  assert.match(game.results().standings[0]!.label, /450 pts/);
 });
 
 test('the clock ends a round with balls unthrown', () => {
