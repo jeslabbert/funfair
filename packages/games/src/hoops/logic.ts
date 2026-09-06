@@ -26,15 +26,15 @@ export const COURT = {
   /** Hoop centre. */
   hoopY: 6.2,
   hoopZ: 3.0,
-  rimR: 0.72,
+  rimR: 0.8,
   rimTube: 0.04,
-  /** Backboard plane and extents. */
-  boardY: 6.75,
+  /** Backboard plane and extents (behind the rim, with clearance). */
+  boardY: 7.2,
   boardHalfWidth: 1.5,
   boardBottom: 2.55,
   boardTop: 4.3,
   /** The cage: back wall and ceiling. */
-  backY: 7.4,
+  backY: 7.9,
   ceilingZ: 6.5,
   /** Net hangs this far below the rim. */
   netDepth: 0.85,
