@@ -787,7 +787,7 @@ export function mountSkeeBallController(
           const held = t.balls.find((b) => b.id === drag!.ballId);
           if (held && (held.status === 'resting' || held.status === 'racked')) grabBall(t, held.id);
         }
-      });
+      }, (ev) => onEvent(ev, performance.now()));
 
       if (next.me.score !== shownScore) {
         shownScore = next.me.score;

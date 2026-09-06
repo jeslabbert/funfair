@@ -68,14 +68,25 @@ export class Prediction<S extends { tick: number }, I extends { tick: number }, 
     return input;
   }
 
-  /** Adopt a server snapshot if our prediction disagrees with it, keeping our newer inputs. */
-  reconcile(snapshot: S, fixup?: (state: S) => void): void {
+  /**
+   * Adopt a server snapshot if our prediction disagrees with it, keeping our
+   * newer inputs. If we had fallen behind the snapshot, the skipped steps are
+   * simulated first so nothing that happened in them goes unannounced.
+   */
+  reconcile(snapshot: S, fixup?: (state: S) => void, onEvent?: (event: E) => void): void {
     const now = performance.now();
     this.pending = this.pending.filter((p) => now - p.sentAt < this.pendingMs);
     if (!this.state) {
       this.state = this.rules.clone(snapshot);
       this.remember(this.state);
       return;
+    }
+    let steps = 0;
+    while (this.state.tick < snapshot.tick && steps++ < this.maxStepsPerFrame) {
+      const events: E[] = [];
+      this.rules.step(this.state, events);
+      this.remember(this.state);
+      if (onEvent) for (const ev of events) onEvent(ev);
     }
     if (snapshot.tick <= this.state.tick) {
       const ours = this.history[snapshot.tick % this.historySize];

@@ -122,6 +122,8 @@ export function mountHoopsController(root: HTMLElement, send: (input: HoopsInput
   let flashAt = -Infinity;
   let shownScore = 0;
   let scoreBumpAt = -Infinity;
+  /** Makes we have celebrated (locally or from the server), so none goes without a flash. */
+  let celebratedMakes = 0;
   let raf = 0;
   let W = 0;
   let H = 0;
@@ -303,10 +305,7 @@ export function mountHoopsController(root: HTMLElement, send: (input: HoopsInput
         buzz(5);
         break;
       case 'score': {
-        const points = ev.points ?? 2;
-        popup = { text: ev.swish ? `SWISH +${points}` : `+${points}`, color: ev.swish ? '#ffe74c' : '#5ce07a', at: now };
-        flashAt = now;
-        buzz(ev.swish ? [30, 40, 30] : [20, 30]);
+        celebrate(ev.points ?? 2, !!ev.swish, now);
         break;
       }
       case 'miss': {
@@ -320,6 +319,13 @@ export function mountHoopsController(root: HTMLElement, send: (input: HoopsInput
         appearedAt.set(ev.ball, now);
         break;
     }
+  }
+
+  function celebrate(points: number, swish: boolean, now: number) {
+    celebratedMakes += 1;
+    popup = { text: swish ? `SWISH +${points}` : `+${points}`, color: swish ? '#ffe74c' : '#5ce07a', at: now };
+    flashAt = now;
+    buzz(swish ? [30, 40, 30] : [20, 30]);
   }
 
   function updateMotion() {
@@ -584,8 +590,11 @@ export function mountHoopsController(root: HTMLElement, send: (input: HoopsInput
           const held = t.balls.find((b) => b.id === drag!.ballId);
           if (held && held.status === 'racked') grabBall(t, held.id);
         }
-      });
+      }, (ev) => onEvent(ev, performance.now()));
       if (next.me.score !== shownScore) {
+        // A make the local simulation never announced (it jumped past it): celebrate it now.
+        if (next.me.makes > celebratedMakes) celebrate(next.me.score - shownScore, next.me.score - shownScore >= 3, performance.now());
+        celebratedMakes = Math.max(celebratedMakes, next.me.makes);
         shownScore = next.me.score;
         scoreBumpAt = performance.now();
       }
