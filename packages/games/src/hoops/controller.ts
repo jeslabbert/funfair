@@ -53,6 +53,8 @@ const CAMERA_TARGET: Vec3 = [0, 3.8, 2.1];
 /** Half of the horizontal field of view. */
 const HALF_HFOV = (12.2 * Math.PI) / 180;
 const LIGHT: Vec3 = [-0.35, -0.45, 0.82];
+/** How far above the touch point the held ball floats, as a fraction of the view height. */
+const HOLD_LIFT = 0.09;
 
 interface Drag {
   ballId: number;
@@ -214,13 +216,16 @@ export function mountHoopsController(root: HTMLElement, send: (input: HoopsInput
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
-  /** The held ball sits under the finger on the plane through the rack, so it never lags or stops. */
+  /**
+   * The held ball rides just above the finger on the plane through the rack,
+   * so it never lags, never stops, and the thumb doesn't hide it.
+   */
   function dragTo(px: number, py: number) {
     if (!drag) return;
-    const hit = unproject(px, py, RACK_Y);
+    const hit = unproject(px, py - H * HOLD_LIFT, RACK_Y);
     drag.x = clampLaunchX(hit.x);
-    drag.hx = hit.x;
-    drag.hz = Math.max(RACK_Z + R, hit.z);
+    drag.hx = clamp(hit.x, -COURT.halfWidth + R, COURT.halfWidth - R);
+    drag.hz = clamp(hit.z, RACK_Z + R, COURT.ceilingZ - R);
   }
 
   canvas.addEventListener('pointerdown', (e) => {
