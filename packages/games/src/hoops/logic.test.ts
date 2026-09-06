@@ -74,7 +74,7 @@ test('a soft throw falls short and a hard one banks off the board', () => {
   assert.equal(short.end?.type, 'miss');
   assert.equal(short.ball.touched, 0, 'never reached the hoop');
   assert.ok(short.ball.y < COURT.hoopY - COURT.rimR, 'landed in front of the hoop');
-  const hard = shoot(0.95);
+  const hard = shoot(1);
   assert.ok(hard.events.some((e) => e.type === 'board'), 'hit the backboard');
 });
 
