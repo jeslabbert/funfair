@@ -268,6 +268,27 @@ export class MeshBuilder {
     return this;
   }
 
+  /** A sphere at a point, optionally squashed per axis. */
+  ball(c: Vec3, r: number, scale: Vec3 = [1, 1, 1], rings = 16, segs = 24): this {
+    const base = this.positions.length / 3;
+    for (let i = 0; i <= rings; i++) {
+      const phi = (i / rings) * Math.PI;
+      for (let s = 0; s <= segs; s++) {
+        const th = (s / segs) * Math.PI * 2;
+        const n: Vec3 = [Math.sin(phi) * Math.cos(th), Math.sin(phi) * Math.sin(th), Math.cos(phi)];
+        this.vertex([c[0] + n[0] * r * scale[0], c[1] + n[1] * r * scale[1], c[2] + n[2] * r * scale[2]], v3.normalize([n[0] / scale[0], n[1] / scale[1], n[2] / scale[2]]));
+      }
+    }
+    for (let i = 0; i < rings; i++) {
+      for (let s = 0; s < segs; s++) {
+        const a = base + i * (segs + 1) + s;
+        const b = a + segs + 1;
+        this.indices.push(a, b, a + 1, a + 1, b, b + 1);
+      }
+    }
+    return this;
+  }
+
   /** A unit UV sphere, normals = positions. */
   sphere(rings = 24, segs = 36): this {
     const base = this.positions.length / 3;

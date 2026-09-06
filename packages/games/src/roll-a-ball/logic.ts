@@ -671,9 +671,9 @@ export const tableRules = {
   step: stepTable,
   clone: cloneTable,
   match: tablesMatch,
-  apply(t: TableState, input: RollABallInput): void {
+  apply(t: TableState, input: RollABallInput, events: TableEvent[]): void {
     if (input.type === 'grab') grabBall(t, input.ball);
-    else launchBall(t, input);
+    else launchBall(t, input, events);
   },
 };
 

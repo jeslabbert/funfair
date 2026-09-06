@@ -60,10 +60,12 @@ export class Prediction<S extends { tick: number }, I extends { tick: number }, 
   }
 
   /** Apply an input locally now; returns it stamped with the current tick, ready to send. */
-  input(make: (tick: number) => I): I | null {
+  input(make: (tick: number) => I, onEvent?: (event: E) => void): I | null {
     if (!this.state) return null;
     const input = make(this.state.tick);
-    this.rules.apply(this.state, input);
+    const events: E[] = [];
+    this.rules.apply(this.state, input, events);
+    if (onEvent) for (const ev of events) onEvent(ev);
     this.pending.push({ input, sentAt: performance.now() });
     return input;
   }
@@ -99,7 +101,7 @@ export class Prediction<S extends { tick: number }, I extends { tick: number }, 
     this.remember(this.state);
     const replay = this.pending.map((p) => p.input).filter((i) => i.tick > snapshot.tick);
     while (this.state.tick < wasAt) {
-      for (const input of replay) if (input.tick === this.state.tick) this.rules.apply(this.state, input);
+      for (const input of replay) if (input.tick === this.state.tick) this.rules.apply(this.state, input, []);
       const events: E[] = [];
       this.rules.step(this.state, events);
       this.remember(this.state);
