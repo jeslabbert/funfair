@@ -106,7 +106,7 @@ test('a weak roll never reaches the ramp and comes back to the bumper', () => {
 
 test('power climbs the rings: pit, then 10 through 50', () => {
   const ladder = [0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9].map((p) => throwBall(p).end?.points ?? -1);
-  assert.deepEqual(ladder, [10, 10, 10, 20, 30, 50, 50, 30]);
+  assert.deepEqual(ladder, [10, 20, 20, 40, 50, 50, 50, 30]);
   const flight = throwBall(0.85);
   assert.ok(flight.events.some((e) => e.type === 'jump'), 'it left the ramp');
   const jumpAt = flight.events.find((e) => e.type === 'jump')!.tick;
@@ -202,7 +202,7 @@ test('the round scores as balls land and ends when everyone is out of balls', ()
   const a = host.racers.find((r) => r.playerId === 'a')!;
   const b = host.racers.find((r) => r.playerId === 'b')!;
   assert.equal(a.score, 50 * BALLS_PER_PLAYER);
-  assert.equal(b.score, 20 * BALLS_PER_PLAYER);
+  assert.equal(b.score, 40 * BALLS_PER_PLAYER);
   assert.equal(a.ballsLeft, 0);
   assert.equal(a.landings.length, BALLS_PER_PLAYER);
   assert.equal(host.winnerId, 'a');

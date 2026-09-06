@@ -70,7 +70,7 @@ const PIT_DEPTH = 0.6;
 const RAIL_H = 0.32;
 const RAMP_LIP_Z = 0.55;
 /** The ball tray in front of the bumper. */
-const TRAY_Y = -0.95;
+const TRAY_Y = -0.55;
 const TRAY_Z = -0.2;
 const TRAY_GAP = 0.6;
 const R = PHYSICS.ballRadius;
@@ -82,10 +82,10 @@ const BOARD: Frame = {
   eu: [0, LANE.boardCos, LANE.boardSin],
   en: [0, -LANE.boardSin, LANE.boardCos],
 };
-const CAMERA_EYE: Vec3 = [0, -9.5, 13.5];
-const CAMERA_TARGET: Vec3 = [0, 6.0, 0.3];
+const CAMERA_EYE: Vec3 = [0, -10.2, 26.4];
+const CAMERA_TARGET: Vec3 = [0, 5.4, 0.8];
 /** Half of the horizontal field of view. */
-const HALF_HFOV = (11.8 * Math.PI) / 180;
+const HALF_HFOV = (8.6 * Math.PI) / 180;
 const LIGHT: Vec3 = [-0.35, -0.5, 0.78];
 
 interface Drag {

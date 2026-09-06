@@ -27,7 +27,7 @@ export const LANE = {
   /** …and launches the ball from here. */
   launchY: 8.8,
   /** The ring board's base and tilt (25° up from the floor: shallow enough to roll on). */
-  boardBaseY: 11.6,
+  boardBaseY: 10.2,
   boardCos: 0.9063077870366499,
   boardSin: 0.42261826174069944,
   boardHalfWidth: 2.3,
@@ -64,7 +64,7 @@ export const PHYSICS = {
   jumpSin: 0.6018150231520483,
   jumpCos: 0.7986355100472928,
   /** Speed kept over the ramp. */
-  rampKeep: 0.85,
+  rampKeep: 0.78,
   gravity: 16,
   /** Faster than this into the board and the ball bounces before it lands. */
   hopSpeed: 3,
