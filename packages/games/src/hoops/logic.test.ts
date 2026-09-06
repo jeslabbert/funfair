@@ -48,7 +48,7 @@ function velocity(power: number, lateral = 0) {
 function shoot(power: number, lateral = 0, x = 0) {
   const table = createTable();
   const events: TableEvent[] = [];
-  shootBall(table, { ball: 0, x, ...velocity(power, lateral) }, events);
+  shootBall(table, { ball: 0, x, z: COURT.launchZ, ...velocity(power, lateral) }, events);
   for (let i = 0; i < 3000 && tableBusy(table); i++) stepTable(table, events);
   const end = events.find((e) => e.type === 'score' || e.type === 'miss');
   return { table, events, ball: table.balls[0]!, end };
@@ -57,8 +57,8 @@ function shoot(power: number, lateral = 0, x = 0) {
 test('the court is deterministic and snapshots replay exactly', () => {
   const a = createTable();
   const b = createTable();
-  shootBall(a, { ball: 0, x: 0.3, ...velocity(0.88, 0.05) });
-  shootBall(b, { ball: 0, x: 0.3, ...velocity(0.88, 0.05) });
+  shootBall(a, { ball: 0, x: 0.3, z: 2, ...velocity(0.88, 0.05) });
+  shootBall(b, { ball: 0, x: 0.3, z: 2, ...velocity(0.88, 0.05) });
   const ea: TableEvent[] = [];
   const eb: TableEvent[] = [];
   for (let i = 0; i < 400; i++) {
@@ -74,18 +74,18 @@ test('a soft throw falls short and a hard one banks off the board', () => {
   assert.equal(short.end?.type, 'miss');
   assert.equal(short.ball.touched, 0, 'never reached the hoop');
   assert.ok(short.ball.y < COURT.hoopY - COURT.rimR, 'landed in front of the hoop');
-  const hard = shoot(0.95);
+  const hard = shoot(1);
   assert.ok(hard.events.some((e) => e.type === 'board'), 'hit the backboard');
 });
 
 test('power finds the hoop: a swish scores 3, anything off the rim or board scores 2', () => {
-  const swish = shoot(0.875);
+  const swish = shoot(0.925);
   assert.equal(swish.end?.type, 'score');
   assert.equal(swish.end?.points, 3);
   assert.equal(swish.end?.swish, true);
   assert.equal(swish.ball.made, true);
   assert.equal(swish.ball.points, 3);
-  const bank = shoot(0.95);
+  const bank = shoot(0.975);
   assert.equal(bank.end?.type, 'score');
   assert.equal(bank.end?.points, 2);
   assert.equal(bank.end?.swish, false);
@@ -93,7 +93,7 @@ test('power finds the hoop: a swish scores 3, anything off the rim or board scor
 });
 
 test('the rim bounces the ball back out', () => {
-  const r = shoot(0.825);
+  const r = shoot(0.85);
   assert.ok(r.events.some((e) => e.type === 'rim'));
   assert.equal(r.end?.type, 'miss');
 });
@@ -108,7 +108,7 @@ test('balls come back to the rack after they land', () => {
   const events: TableEvent[] = [];
   assert.ok(grabBall(table, 1));
   assert.ok(!grabBall(table, 1), 'not twice');
-  shootBall(table, { ball: 1, x: 0, ...velocity(0.7) }, events);
+  shootBall(table, { ball: 1, x: 0, z: COURT.launchZ, ...velocity(0.7) }, events);
   assert.equal(ballsReady(table), BALLS_PER_PLAYER - 1);
   for (let i = 0; i < 3000 && tableBusy(table); i++) stepTable(table, events);
   assert.equal(table.balls[1]!.status, 'done');
@@ -122,12 +122,12 @@ test('balls come back to the rack after they land', () => {
 test('the round scores makes and streaks and ends on the clock', () => {
   const { game, advance } = makeGame(['a', 'b']);
   const tick = (id: string) => game.playerState(id).table.tick;
-  game.onInput('a', { type: 'shoot', ball: 0, x: 0, ...velocity(0.875), tick: 0 });
+  game.onInput('a', { type: 'shoot', ball: 0, x: 0, z: COURT.launchZ, ...velocity(0.925), tick: 0 });
   assert.equal(game.playerState('a').table.balls[0]!.status, 'racked', 'no shooting during the countdown');
   advance(COUNTDOWN_MS);
   for (let i = 0; i < 3; i++) {
-    game.onInput('a', { type: 'shoot', ball: i, x: 0, ...velocity(0.875), tick: tick('a') });
-    game.onInput('b', { type: 'shoot', ball: i, x: 0, ...velocity(0.7), tick: tick('b') });
+    game.onInput('a', { type: 'shoot', ball: i, x: 0, z: COURT.launchZ, ...velocity(0.925), tick: tick('a') });
+    game.onInput('b', { type: 'shoot', ball: i, x: 0, z: COURT.launchZ, ...velocity(0.7), tick: tick('b') });
     advance(300);
   }
   advance(2500);
@@ -160,6 +160,6 @@ test('malformed input is rejected', () => {
   game.onInput('a', { type: 'shoot', vx: 'lots' });
   // @ts-expect-error deliberately malformed
   game.onInput('a', null);
-  game.onInput('a', { type: 'shoot', ball: 42, x: 0, vx: 0, vy: 5, tick: 0 });
+  game.onInput('a', { type: 'shoot', ball: 42, x: 0, z: 1, vx: 0, vy: 5, tick: 0 });
   assert.ok(game.playerState('a').table.balls.every((b) => b.status === 'racked'));
 });
