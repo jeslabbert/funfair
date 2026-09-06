@@ -222,6 +222,52 @@ export class MeshBuilder {
     return this;
   }
 
+  /** A torus lying on a frame: ring radius R around (cx, cu) at height h, tube radius r. */
+  torus(f: Frame, cx: number, cu: number, h: number, R: number, r: number, segs = 48, tube = 10): this {
+    const pt = (a: number, b: number): Vec3 => {
+      const ring = R + r * Math.cos(b);
+      return framePoint(f, cx + Math.cos(a) * ring, cu + Math.sin(a) * ring, h + r * Math.sin(b));
+    };
+    const nrm = (a: number, b: number): Vec3 =>
+      v3.normalize(v3.add(v3.scale(v3.add(v3.scale(f.ex, Math.cos(a)), v3.scale(f.eu, Math.sin(a))), Math.cos(b)), v3.scale(f.en, Math.sin(b))));
+    for (let s = 0; s < segs; s++) {
+      const a0 = (s / segs) * Math.PI * 2;
+      const a1 = ((s + 1) / segs) * Math.PI * 2;
+      for (let k = 0; k < tube; k++) {
+        const b0 = (k / tube) * Math.PI * 2;
+        const b1 = ((k + 1) / tube) * Math.PI * 2;
+        const p00 = pt(a0, b0);
+        const p10 = pt(a1, b0);
+        const p11 = pt(a1, b1);
+        const p01 = pt(a0, b1);
+        const n = nrm((a0 + a1) / 2, (b0 + b1) / 2);
+        const face = v3.cross(v3.sub(p10, p00), v3.sub(p01, p00));
+        if (v3.dot(face, n) >= 0) this.quad(p00, p10, p11, p01, n);
+        else this.quad(p00, p01, p11, p10, n);
+      }
+    }
+    return this;
+  }
+
+  /** A tapered tube (a cone section) between two rings at different heights, facing outwards (or inwards). */
+  cone(f: Frame, cx: number, cu: number, r0: number, h0: number, r1: number, h1: number, inward = false, segs = 32): this {
+    for (let s = 0; s < segs; s++) {
+      const a0 = (s / segs) * Math.PI * 2;
+      const a1 = ((s + 1) / segs) * Math.PI * 2;
+      const p00 = framePoint(f, cx + Math.cos(a0) * r0, cu + Math.sin(a0) * r0, h0);
+      const p10 = framePoint(f, cx + Math.cos(a1) * r0, cu + Math.sin(a1) * r0, h0);
+      const p01 = framePoint(f, cx + Math.cos(a0) * r1, cu + Math.sin(a0) * r1, h1);
+      const p11 = framePoint(f, cx + Math.cos(a1) * r1, cu + Math.sin(a1) * r1, h1);
+      const am = (a0 + a1) / 2;
+      const radial = v3.normalize(v3.add(v3.scale(f.ex, Math.cos(am)), v3.scale(f.eu, Math.sin(am))));
+      const slope = (r0 - r1) / Math.max(1e-6, Math.abs(h1 - h0));
+      const n = v3.normalize(v3.add(radial, v3.scale(f.en, slope)));
+      if (inward) this.quad(p10, p00, p01, p11, [-n[0], -n[1], -n[2]]);
+      else this.quad(p00, p10, p11, p01, n);
+    }
+    return this;
+  }
+
   /** A unit UV sphere, normals = positions. */
   sphere(rings = 24, segs = 36): this {
     const base = this.positions.length / 3;
