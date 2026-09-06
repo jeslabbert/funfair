@@ -5,8 +5,9 @@ import type { GameClientDefinition } from '@funfair/shared/client';
 import { rollABallClient } from './roll-a-ball/client';
 import { skeeBallClient } from './skee-ball/client';
 import { hoopsClient } from './hoops/client';
+import { whackClient } from './whack/client';
 
-export const clientGames: readonly GameClientDefinition<any, any, any>[] = [rollABallClient, skeeBallClient, hoopsClient];
+export const clientGames: readonly GameClientDefinition<any, any, any>[] = [rollABallClient, skeeBallClient, hoopsClient, whackClient];
 
 export function findClientGame(id: string): GameClientDefinition<any, any, any> | undefined {
   return clientGames.find((g) => g.meta.id === id);

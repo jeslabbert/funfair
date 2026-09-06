@@ -220,9 +220,33 @@ can be unit-tested with `node:test` (`pnpm test`).
   `netKeep`). Released low, a straight throw swishes at about 92% flick power; released
   mid-screen, at about 82%, with makes off the rim or glass from 80% to full power.
 
+## Mole Mayhem
+
+- Forty-five seconds, nine holes, and moles that pop up and duck straight back down. You
+  don't tap them: **every swipe is a blade**, and whatever the stroke passes through gets
+  whacked. Hits close together **chain a combo** worth more each time, up to ×5. **Golden
+  moles** are worth three but don't stay long, and **bombs** cost points, break the chain
+  and jam the blade for the best part of a second.
+- The finger's path is sent as a run of short segments, each stamped with its tick, and a
+  mole is hit when a segment passes within a blade's width of it while it's out of its
+  hole. Everything is deterministic: the moles that come up are a pure function of the
+  round's seed and the tick (an integer hash, no floating point), so the phone predicts
+  the field and the server rewinds to score a late stroke at the tick it really happened.
+  **Every player gets the same moles**, so it's a fair race.
+- The phone renders the field with the shared WebGL renderer: grass, a fence, nine holes
+  whose dark openings hide a mole until it climbs out, and moles built from spheres (body,
+  snout, ears, eyes, buck teeth) that spin off when whacked. The blade leaves a tapering
+  streak and turns red while jammed. The big screen shows one card per player with score,
+  moles whacked, bombs cut, the live combo and a top-down field lighting up the holes they
+  just hit, plus a feed and the clock.
+- Tuning in `whack/logic.ts`: `FIELD` (the grid), `MOLE` (how far it rises, how wide the
+  blade is, how long the rise and duck take), `RULES` (the spawn beat, how fast the field
+  fills, bomb and golden chances, combo window and cap, the bomb penalty and stun) and
+  `LIFE_TICKS` per kind.
+
 ## Roadmap
 
-- More games: whack-a-mole, ring toss, …
+- More games: ring toss, duck shoot, …
 - Sound on the host screen, a little more juice (confetti, crowd noise).
 - Match-long scoreboard across several games.
 - Deploy recipe (single container, TLS) for playing away from home.

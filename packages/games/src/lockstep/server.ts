@@ -8,8 +8,8 @@ export interface LockstepRules<S extends { tick: number }, I extends { tick: num
   /** Advance the state by one step (tick + 1), reporting what happened. */
   step(state: S, events: E[]): void;
   clone(state: S): S;
-  /** Apply an input to the state at its current tick. */
-  apply(state: S, input: I): void;
+  /** Apply an input to the state at its current tick, reporting what it caused. */
+  apply(state: S, input: I, events: E[]): void;
 }
 
 export class LockstepSim<S extends { tick: number }, I extends { tick: number }, E> {
@@ -62,7 +62,9 @@ export class LockstepSim<S extends { tick: number }, I extends { tick: number },
       else at = now;
     }
     this.lastInputTick = at;
-    this.rules.apply(this.state, input);
+    const events: E[] = [];
+    this.rules.apply(this.state, input, events);
+    for (const ev of events) onEvent(ev);
     // Bring the state back up to date; anything that happens on the way counts as usual.
     this.advanceTo(now, onEvent);
   }
@@ -72,7 +74,9 @@ export class LockstepSim<S extends { tick: number }, I extends { tick: number },
     while (this.queued.length && this.queued[0]!.tick <= this.state.tick) {
       const input = this.queued.shift()!;
       this.lastInputTick = Math.max(this.lastInputTick, this.state.tick);
-      this.rules.apply(this.state, input);
+      const inputEvents: E[] = [];
+      this.rules.apply(this.state, input, inputEvents);
+      for (const ev of inputEvents) onEvent(ev);
     }
     const events: E[] = [];
     this.rules.step(this.state, events);
