@@ -45,7 +45,7 @@ const LABEL_MS = 600;
 const FLASH_MS = 600;
 const R = PHYSICS.ballRadius;
 /** The ball rack in front of the player. */
-const RACK_Y = -0.9;
+const RACK_Y = COURT.launchY;
 const RACK_Z = 0.55;
 const RACK_GAP = 0.95;
 const CAMERA_EYE: Vec3 = [0, -8.2, 4.6];
@@ -268,12 +268,13 @@ export function mountHoopsController(root: HTMLElement, send: (input: HoopsInput
     const gesture = readFlick(drag.samples, H);
     const ballId = drag.ballId;
     const x = drag.x;
+    const z = drag.hz;
     drag = null;
     if (!pred.state || !state || state.phase !== 'playing') return;
     // No flick: a lob straight up that drops back in front of you. Cheap, but a throw.
     const speed = gesture ? gesture.power * PHYSICS.maxLaunchSpeed : 2;
     const vel = gesture ? clampLaunch(speed * gesture.dirX, speed * gesture.dirY) : { vx: 0, vy: speed };
-    const input = pred.input((tick) => ({ type: 'shoot', ball: ballId, x, vx: vel.vx, vy: vel.vy, tick }));
+    const input = pred.input((tick) => ({ type: 'shoot', ball: ballId, x, z, vx: vel.vx, vy: vel.vy, tick }));
     if (input) send(input);
   };
   canvas.addEventListener('pointerup', endDrag);

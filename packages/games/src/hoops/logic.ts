@@ -19,8 +19,8 @@ export const RETURN_MS = 1200;
 /** World units: y runs away from the player, z is up. */
 export const COURT = {
   halfWidth: 2.3,
-  /** Balls are thrown from here. */
-  launchY: 0,
+  /** Balls are thrown from the rack line, from wherever they are held: across and up to the ceiling. */
+  launchY: -0.9,
   launchZ: 1.1,
   launchMaxX: 1.6,
   /** Hoop centre. */
@@ -35,11 +35,11 @@ export const COURT = {
   boardTop: 4.3,
   /** The cage: back wall and ceiling. */
   backY: 7.9,
-  ceilingZ: 6.5,
+  ceilingZ: 8.0,
   /** Net hangs this far below the rim. */
   netDepth: 0.85,
   /** Behind this line a ball is back with the player and gets returned. */
-  outY: -0.6,
+  outY: -1.8,
 } as const;
 
 export const PHYSICS = {
@@ -47,9 +47,12 @@ export const PHYSICS = {
   ballRadius: 0.4,
   maxLaunchSpeed: 16,
   maxLateralRatio: 0.35,
-  /** Launch angle: sin/cos of 60°, a high arc that drops into the hoop. */
+  /** Launch angle from a low release: sin/cos of 60°, a high arc that drops into the hoop… */
   launchSin: 0.8660254037844386,
   launchCos: 0.5,
+  /** …flattening to 28° when released up near the ceiling. */
+  highSin: 0.4694715627858908,
+  highCos: 0.882947592858927,
   rimRestitution: 0.5,
   rimTangentKeep: 0.85,
   boardRestitution: 0.5,
@@ -103,20 +106,22 @@ export interface TableEvent {
 export interface Shot {
   ball: number;
   x: number;
+  /** Release height. */
+  z: number;
   vx: number;
   vy: number;
 }
 
 export type HoopsInput =
   | { type: 'grab'; ball: number; tick: number }
-  | { type: 'shoot'; ball: number; x: number; vx: number; vy: number; tick: number };
+  | { type: 'shoot'; ball: number; x: number; z: number; vx: number; vy: number; tick: number };
 
 export function isHoopsInput(v: unknown): v is HoopsInput {
   if (!v || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
   const num = (k: string) => typeof o[k] === 'number' && Number.isFinite(o[k]);
   if (o.type === 'grab') return num('ball') && num('tick');
-  if (o.type === 'shoot') return num('ball') && num('x') && num('vx') && num('vy') && num('tick');
+  if (o.type === 'shoot') return num('ball') && num('x') && num('z') && num('vx') && num('vy') && num('tick');
   return false;
 }
 
@@ -129,6 +134,20 @@ export function clamp(v: number, lo: number, hi: number): number {
 
 export function clampLaunchX(x: number): number {
   return clamp(Number.isFinite(x) ? x : 0, -COURT.launchMaxX, COURT.launchMaxX);
+}
+
+/** Direction of a throw released at height z: steep from low, flatter from high. Arithmetic and sqrt only. */
+export function launchDir(z: number): { cos: number; sin: number } {
+  const zz = clampLaunchZ(z);
+  const t = (zz - COURT.launchZ) / (COURT.ceilingZ - PHYSICS.ballRadius - COURT.launchZ);
+  const c = PHYSICS.launchCos * (1 - t) + PHYSICS.highCos * t;
+  const s = PHYSICS.launchSin * (1 - t) + PHYSICS.highSin * t;
+  const n = Math.sqrt(c * c + s * s) || 1;
+  return { cos: c / n, sin: s / n };
+}
+
+export function clampLaunchZ(z: number): number {
+  return clamp(Number.isFinite(z) ? z : COURT.launchZ, COURT.launchZ, COURT.ceilingZ - PHYSICS.ballRadius);
 }
 
 /** Clamp a flick to the launch envelope: forward speed and a limited sideways share. */
@@ -188,10 +207,11 @@ export function shootBall(t: TableState, shot: Shot, events?: TableEvent[]): boo
   const vel = clampLaunch(shot.vx, shot.vy);
   b.x = clampLaunchX(shot.x);
   b.y = COURT.launchY;
-  b.z = COURT.launchZ;
+  b.z = clampLaunchZ(shot.z);
+  const dir = launchDir(b.z);
   b.vx = vel.vx;
-  b.vy = vel.vy * PHYSICS.launchCos;
-  b.vz = vel.vy * PHYSICS.launchSin;
+  b.vy = vel.vy * dir.cos;
+  b.vz = vel.vy * dir.sin;
   b.status = 'flying';
   b.touched = 0;
   b.made = false;

@@ -200,7 +200,8 @@ can be unit-tested with `node:test` (`pnpm test`).
 - Forty-five seconds, four balls each on a rack in front of a pop-a-shot cage, and every
   ball comes back to the rack a moment after it lands, so you can keep several in the air.
   Grab a ball, flick it: the flick's speed is the throw's power and its angle is the aim,
-  and the ball leaves at 60° from wherever along the rack you let go. Through the net is
+  and the ball leaves from wherever you let go – a high 60° arc from down low, flatter the
+  higher you release it. Through the net is
   **2**, a clean **swish is 3**.
 - It's all simulated: plain ballistics, a **rim** modelled as a ring of tube the ball
   bounces off (a ball balancing on the rim tips inward), a **backboard** to bank off, the
@@ -215,9 +216,9 @@ can be unit-tested with `node:test` (`pnpm test`).
   swishes, green makes, red misses), plus a feed and the clock. Most points at the buzzer
   wins.
 - Tuning in `hoops/logic.ts`: `COURT` (hoop position and size, backboard, cage) and
-  `PHYSICS` (`gravity`, launch angle, `maxLaunchSpeed`, restitutions, `netKeep`). A
-  straight throw swishes at about 87% flick power and goes in off the rim or glass from
-  85% to 95%.
+  `PHYSICS` (`gravity`, the low and high launch angles, `maxLaunchSpeed`, restitutions,
+  `netKeep`). Released low, a straight throw swishes at about 92% flick power; released
+  mid-screen, at about 82%, with makes off the rim or glass from 80% to full power.
 
 ## Roadmap
 
