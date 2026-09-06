@@ -927,7 +927,7 @@ export function mountRollABallController(
           const held = t.balls.find((b) => b.id === drag!.ballId);
           if (held && held.status === 'resting') grabBall(t, held.id);
         }
-      });
+      }, (ev) => onEvent(ev, performance.now()));
 
       rankEl.textContent = next.phase === 'countdown' ? 'Ready?' : `${ordinal(next.me.rank)} of ${next.playerCount}`;
       scoreEl.textContent = `${next.me.progress} / ${next.trackLength}`;
