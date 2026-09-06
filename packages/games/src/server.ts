@@ -5,8 +5,9 @@
 import type { GameMeta, GameServerDefinition } from '@funfair/shared';
 import { rollABallServer } from './roll-a-ball/server';
 import { skeeBallServer } from './skee-ball/server';
+import { hoopsServer } from './hoops/server';
 
-export const serverGames: readonly GameServerDefinition<any, any, any>[] = [rollABallServer, skeeBallServer];
+export const serverGames: readonly GameServerDefinition<any, any, any>[] = [rollABallServer, skeeBallServer, hoopsServer];
 
 export const gameMetas: readonly GameMeta[] = serverGames.map((g) => g.meta);
 
