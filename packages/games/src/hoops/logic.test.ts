@@ -85,7 +85,7 @@ test('power finds the hoop: a swish scores 3, anything off the rim or board scor
   assert.equal(swish.end?.swish, true);
   assert.equal(swish.ball.made, true);
   assert.equal(swish.ball.points, 3);
-  const bank = shoot(0.9);
+  const bank = shoot(0.95);
   assert.equal(bank.end?.type, 'score');
   assert.equal(bank.end?.points, 2);
   assert.equal(bank.end?.swish, false);

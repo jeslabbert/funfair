@@ -57,9 +57,11 @@ const LIGHT: Vec3 = [-0.35, -0.45, 0.82];
 interface Drag {
   ballId: number;
   pointerId: number;
+  /** Where along the rack the throw leaves from. */
   x: number;
+  /** The held ball, on the vertical plane through the rack: across and up. */
   hx: number;
-  hy: number;
+  hz: number;
   samples: Sample[];
 }
 
@@ -163,18 +165,18 @@ export function mountHoopsController(root: HTMLElement, send: (input: HoopsInput
     return { x: ((c[0] / w + 1) / 2) * W, y: ((1 - c[1] / w) / 2) * H, depth: c[2] / w };
   }
 
-  /** The point on the horizontal plane at height z under a screen position. */
-  function unproject(px: number, py: number, z: number): { x: number; y: number } {
-    if (!viewProjInv) return { x: 0, y: 0 };
+  /** The point on the vertical plane y = planeY under a screen position: across and up. */
+  function unproject(px: number, py: number, planeY: number): { x: number; z: number } {
+    if (!viewProjInv) return { x: 0, z: 0 };
     const nx = (px / W) * 2 - 1;
     const ny = 1 - (py / H) * 2;
     const a = mat4Transform(viewProjInv, nx, ny, -1);
     const b = mat4Transform(viewProjInv, nx, ny, 1);
     const p0: Vec3 = [a[0] / a[3], a[1] / a[3], a[2] / a[3]];
     const p1: Vec3 = [b[0] / b[3], b[1] / b[3], b[2] / b[3]];
-    const dz = p1[2] - p0[2];
-    const t = Math.abs(dz) < 1e-9 ? 0 : (z - p0[2]) / dz;
-    return { x: p0[0] + (p1[0] - p0[0]) * t, y: p0[1] + (p1[1] - p0[1]) * t };
+    const dy = p1[1] - p0[1];
+    const t = Math.abs(dy) < 1e-9 ? 0 : (planeY - p0[1]) / dy;
+    return { x: p0[0] + (p1[0] - p0[0]) * t, z: p0[2] + (p1[2] - p0[2]) * t };
   }
 
   function pxPerUnit(p: Vec3): number {
@@ -212,12 +214,13 @@ export function mountHoopsController(root: HTMLElement, send: (input: HoopsInput
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
+  /** The held ball sits under the finger on the plane through the rack, so it never lags or stops. */
   function dragTo(px: number, py: number) {
     if (!drag) return;
-    const hit = unproject(px, py, COURT.launchZ);
+    const hit = unproject(px, py, RACK_Y);
     drag.x = clampLaunchX(hit.x);
-    drag.hx = clamp(hit.x, -COURT.launchMaxX, COURT.launchMaxX);
-    drag.hy = clamp(hit.y, RACK_Y - 0.4, 2.2);
+    drag.hx = hit.x;
+    drag.hz = Math.max(RACK_Z + R, hit.z);
   }
 
   canvas.addEventListener('pointerdown', (e) => {
@@ -235,7 +238,7 @@ export function mountHoopsController(root: HTMLElement, send: (input: HoopsInput
     }
     if (!best || !pred.state) return;
     const slot = rackSlot(best.id);
-    drag = { ballId: best.id, pointerId: e.pointerId, x: slot[0], hx: slot[0], hy: RACK_Y, samples: [{ x: e.clientX, y: e.clientY, t: performance.now() }] };
+    drag = { ballId: best.id, pointerId: e.pointerId, x: slot[0], hx: slot[0], hz: slot[2], samples: [{ x: e.clientX, y: e.clientY, t: performance.now() }] };
     dragTo(p.x, p.y);
     try {
       canvas.setPointerCapture(e.pointerId);
@@ -384,8 +387,9 @@ export function mountHoopsController(root: HTMLElement, send: (input: HoopsInput
     if (!pred.state) return out;
     for (const b of pred.state.balls) {
       if (drag && drag.ballId === b.id) {
-        const pos: Vec3 = [drag.hx, drag.hy, COURT.launchZ + 0.25];
-        out.push({ id: b.id, pos, alpha: 1, dim: 0, shadow: { x: drag.hx, y: drag.hy, scale: 1.1, alpha: 0.2 } });
+        const pos: Vec3 = [drag.hx, RACK_Y, drag.hz];
+        const lift = clamp((drag.hz - RACK_Z - R) / 3, 0, 1);
+        out.push({ id: b.id, pos, alpha: 1, dim: 0, shadow: { x: drag.hx, y: RACK_Y, scale: 1 + lift * 0.3, alpha: 0.3 - lift * 0.2 } });
         continue;
       }
       if (b.status === 'racked' || b.status === 'held') {
