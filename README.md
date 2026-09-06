@@ -190,8 +190,10 @@ can be unit-tested with `node:test` (`pnpm test`).
   flight: `gravity`, `hopSpeed`, `hopRestitution`; board: `faceFriction`, `cupDrag`,
   `lipSpeed`, `escapeSpeed`, `skipSpeed`, `captureSpeed`, `lipRestitution`, `skipDamping`),
   `BALLS_PER_PLAYER` and `ROUND_MS`, all in `skee-ball/logic.ts`. A straight throw from the
-  bumper climbs 10 → 20 → 30 → 50 over flick power 0.65 → 0.85, lands high and rolls back
-  into the 30 around 0.9, and sails over the top at full power; the pockets take angle.
+  bumper climbs 10 → 20 → 40 → 50 over flick power 0.55 → 0.75, holds the 50 to about 0.85,
+  rolls back into the 30 or 20 beyond that, and sails over the top at full power; the
+  pockets take angle. The phone looks down on the alley from a steep, distant camera so the
+  run-up takes most of the screen.
 
 ## Roadmap
 
