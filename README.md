@@ -244,9 +244,47 @@ can be unit-tested with `node:test` (`pnpm test`).
   fills, bomb and golden chances, combo window and cap, the bomb penalty and stun) and
   `LIFE_TICKS` per kind.
 
+## Running it for real
+
+A party game wants everyone on the same wi-fi: the host screen on a TV or laptop, phones
+as controllers, and no round trip to the internet in the middle of a flick.
+
+**On your own machine** (nothing to sign up for):
+
+```
+pnpm install
+pnpm build
+pnpm start
+```
+
+It prints two addresses. Open the first on the big screen; the second is the one phones
+can reach on the same wi-fi, and the host screen shows it as a QR-friendly join link.
+`pnpm dev` does the same with live reload while you're working on a game.
+
+**On a home server or spare machine** — Docker, still on your own network:
+
+```
+docker compose up -d          # then open http://<that machine>:3000
+```
+
+**Somewhere public**, so people can join from anywhere. The image is a single container
+that serves the web app and the websocket on one port, reads `PORT`/`HOST` from the
+environment, and needs no database or state of its own, so most hosts will take it as-is.
+Fly.io is set up here because websockets and TLS come for free:
+
+```
+fly launch --copy-config --no-deploy   # first time only: pick a name and region
+fly deploy
+fly scale count 0                      # when the party's over
+```
+
+The page's websocket follows its own origin, so behind TLS it upgrades to `wss` by itself,
+and the host screen hands out the public URL rather than a LAN address. Rooms live in
+memory and expire ten minutes after everyone leaves, so a restart between parties costs
+nothing.
+
 ## Roadmap
 
 - More games: ring toss, duck shoot, …
 - Sound on the host screen, a little more juice (confetti, crowd noise).
 - Match-long scoreboard across several games.
-- Deploy recipe (single container, TLS) for playing away from home.
