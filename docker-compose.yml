@@ -1,0 +1,8 @@
+# For a home server or a spare machine on the wi-fi: `docker compose up -d`,
+# then open http://<that machine>:3000 on the big screen.
+services:
+  funfair:
+    build: .
+    ports:
+      - '3000:3000'
+    restart: unless-stopped
